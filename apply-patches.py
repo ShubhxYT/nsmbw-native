@@ -509,6 +509,77 @@ inline bool SetNetplayInputDelay(int32_t value) {
     report.append("netplay input buffer sized from ping, jitter and player count")
 
 
+def patch_ping_hud(repo: pathlib.Path, report: list[str]) -> None:
+    """Show the session's round trip and input delay on screen, on every device.
+
+    A client shows the round trip to the host, the host shows each client's, and both show the
+    input delay in force. Those two numbers are what F10 > LAN > Input delay is tuned against:
+    raise the delay while it hitches, lower it while everything feels late.
+    """
+    session = repo / "runtime/include/netplay_session.h"
+    text = read(session)
+    if "frames of input delay this session runs with" in text:
+        report.append("netplay ping readout already added")
+        return
+    text = _replace_once(text, """    uint32_t frame = 0;
+    int waitingForSlot = -1;""", """    uint32_t frame = 0;
+    uint32_t inputDelay = 0;   // frames of input delay this session runs with
+    int waitingForSlot = -1;""", "status fields")
+    write(session, text)
+
+    impl = repo / "runtime/src/netplay/netplay_session.cpp"
+    text = read(impl)
+    text = _replace_once(text, """    status.lostSlot = s.lostSlot;
+    for (int slot = 0; slot < kMaxSlots; ++slot) {
+        status.pingMs[slot] = s.remotes[slot].rttMs;
+    }""", """    status.lostSlot = s.lostSlot;
+    status.inputDelay = s.config.inputDelay;
+    for (int slot = 0; slot < kMaxSlots; ++slot) {
+        // 0xFFFFFFFF: nothing heard from that slot yet; a real 0 ms on loopback still shows.
+        status.pingMs[slot] = s.remotes[slot].heard ? s.remotes[slot].rttMs : 0xFFFFFFFFu;
+    }""", "status fill")
+    write(impl, text)
+
+    ui = repo / "runtime/src/netplay/netplay_ui.cpp"
+    text = read(ui)
+    text = _replace_once(text, """    std::string line;
+    if (status.waitingForSlot >= 0 && status.waitedMs > 700) {""",
+    """    // The session's latency, always on screen: a client shows the round trip to the host, the host
+    // shows each client's. Next to it is the input delay in force, which is the pair to watch when
+    // tuning F10 > LAN > Input delay.
+    std::string ping;
+    if (status.localSlot == 0) {
+        for (uint32_t slot = 1; slot < status.playerCount && slot < 4; ++slot) {
+            if (status.pingMs[slot] == 0xFFFFFFFFu) {
+                continue;
+            }
+            if (!ping.empty()) {
+                ping += "/";
+            }
+            ping += std::to_string(status.pingMs[slot]);
+        }
+    } else if (status.pingMs[0] != 0xFFFFFFFFu) {
+        ping = std::to_string(status.pingMs[0]);
+    }
+    if (!ping.empty()) {
+        const std::string hud = ping + " ms  delay " + std::to_string(status.inputDelay);
+        const float hudY = 200.0f, hudHalfWidth = 132.0f;  // near the top edge (y grows upward)
+        list->AddRectFilled(ImVec2(view.centerX - hudHalfWidth * view.scale, view.centerY - (hudY + 17) * view.scale),
+                            ImVec2(view.centerX + hudHalfWidth * view.scale, view.centerY - (hudY - 17) * view.scale),
+                            IM_COL32(18, 28, 58, 150), 8 * view.scale);
+        Text(c, hud, 0, hudY, 19);
+    }
+
+    std::string line;
+    if (status.waitingForSlot >= 0 && status.waitedMs > 700) {""", "session overlay")
+    text = _replace_once(text, "    const float y = 190.0f;",
+                        "    const float y = 150.0f;  // below the ping readout, which sits near the top edge",
+                        "stall banner position")
+    write(ui, text)
+
+    report.append("netplay ping and input delay shown on screen")
+
+
 
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -534,6 +605,7 @@ def main() -> None:
     patch_label_config(repo, report)
     patch_lan_beta(repo, report)
     patch_netplay_latency(repo, report)
+    patch_ping_hud(repo, report)
     if disc is not None:
         patch_variant_hash(repo, disc, report)
     for line in report:
