@@ -179,6 +179,11 @@ if (-not (Test-Path $exe)) { Die "the build produced no exe (expected $exe)" }
 
 # ---------------------------------------------------------------- 6. collect
 Step 'Collecting the result'
+# A running game holds its DLLs open, so the old folder cannot be replaced: the copy below fails
+# with "access to the path is denied" on dxcompiler.dll. Stop it first; rebuilding while playing is
+# otherwise a confusing failure at the very end of a long build.
+Get-Process -Name 'New Super Mario Bros. Wii' -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 400
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 # Only what the program needs at run time. A wholesale copy of native-build also brings the
