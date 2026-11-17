@@ -73,6 +73,37 @@ If it looks stuck, check the stage: `logs/` in the work folder has one log per s
 (`configure.log`, `build.log`, `translate.log`, ...). On Windows also check
 `projects\nsmbw\tools\rebuild-*.log` inside the checkout.
 
+## Remote play hitches, then skips ahead
+
+That is the input buffer, and it is the whole difference between smooth and stuttery in a lockstep
+session. Every device must hold a frame until all players' inputs for it have arrived. If the buffer
+is smaller than the time the slowest input needs, the frame waits — everyone freezes — and then the
+frames already sitting there run back to back, which looks like the game skipping to catch up.
+
+- **F10 › LAN › Input delay** is the knob. `auto` sizes it from the room's ping and jitter at the
+  moment the room starts; it is read when a room starts, not live.
+- Raise it if it hitches and skips. Lower it if every button feels late and it never hitches.
+- A two player session needs roughly half the ping; three or four players need roughly the whole
+  ping, because the host relays each client's input to the others.
+- If it needs more than about 8 frames (135 ms) to stay smooth, the route is the problem: check
+  `tailscale ping <other machine>`. A line that says `via DERP` is going through a relay hundreds of
+  kilometres away; a direct connection (`direct`) is what you want. Opening UDP 41641 on the host's
+  router or turning off a VPN often flips it back to direct.
+
+## Tunnels: Funnel and ngrok will not carry this
+
+The session is **UDP** on port 52130 (plus a discovery broadcast). Two popular tunnels cannot carry
+that:
+
+- **Tailscale Funnel** only forwards TCP/HTTPS (ports 443, 8443, 10000) and is bandwidth limited. It
+  cannot carry this session at all.
+- **ngrok** has no UDP endpoints on any plan.
+
+What does work: plain **Tailscale** between the players (its own relay, DERP, is UDP-capable), a
+**playit.gg** UDP tunnel, **frp** on a VPS, or the host having a public address or port forward.
+Sending this traffic through TCP would add head-of-line blocking on top of the very latency the
+buffer exists to absorb.
+
 ## LAN play: rooms are not found, or fail to start
 
 LAN play is **beta**.

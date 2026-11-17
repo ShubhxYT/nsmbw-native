@@ -334,6 +334,181 @@ def patch_lan_beta(repo: pathlib.Path, report: list[str]) -> None:
     write(overlay, text)
     report.append("F10 LAN settings marked beta")
 
+def _replace_once(text: str, old: str, new: str, what: str) -> str:
+    """Replace `old` exactly once, or fail loudly: a silent miss would ship a half-applied fix."""
+    if text.count(old) != 1:
+        sys.exit(f"netplay latency patch: expected one {what}, found {text.count(old)}")
+    return text.replace(old, new, 1)
+
+
+def patch_netplay_latency(repo: pathlib.Path, report: list[str]) -> None:
+    """Size the lockstep input buffer from the link, and stop the catch-up burst.
+
+    The buffer decides whether an online session is smooth. If it is smaller than the time an input
+    needs to arrive, the frame waits, every device freezes, and then the frames that were already
+    available run back to back to catch up - the hitch-and-skip players describe as stutter.
+
+    Three things were wrong with the old sizing (half the round trip + 12 ms + one frame, divided by
+    17, clamped to 2..8):
+      * integer division rounded DOWN, and a buffer must round up;
+      * 12 ms was a guess, not the jitter actually measured on the link;
+      * half a round trip only covers a two player session. With three or four, a client's input is
+        relayed onward by the host, so it crosses two one-way trips before the last device has it.
+    The computation also capped at 8 frames (133 ms), which no session above roughly 190 ms of ping
+    can survive without stalling every frame.
+
+    Dolphin's rule of thumb for the same problem is about one buffer frame per 16 ms of ping plus
+    one for spikes; for two players this lands on the same numbers.
+    """
+    lobby = repo / "runtime/src/netplay/netplay_lobby.cpp"
+    text = read(lobby)
+    if "InputDelayFrames" in text:
+        report.append("netplay input buffer already sized from the link")
+        return
+
+    text = _replace_once(text, "#include <chrono>\n#include <cstdlib>", "#include <chrono>\n#include <cmath>\n#include <cstdlib>",
+                         "include block")
+
+    text = _replace_once(text, """    Clock::time_point lastHeard{};
+    uint32_t rttMs = 0;""", """    Clock::time_point lastHeard{};
+    uint32_t rttMs = 0;
+    // The spread of the round trip while the room was open, not just its latest value: the input
+    // buffer has to cover the spread, or a packet that arrives late stops everyone (InputDelayFrames).
+    uint32_t rttMinMs = 0;
+    uint32_t rttMaxMs = 0;
+    uint32_t rttSamples = 0;""", "host member fields")
+
+    text = _replace_once(text, """        if (echo != 0 && NowMs() >= echo + echoDelay) {
+            member->rttMs = NowMs() - echo - echoDelay;
+        }""", """        if (echo != 0 && NowMs() >= echo + echoDelay) {
+            member->rttMs = NowMs() - echo - echoDelay;
+            member->rttMinMs = member->rttSamples == 0 ? member->rttMs : std::min(member->rttMinMs, member->rttMs);
+            member->rttMaxMs = std::max(member->rttMaxMs, member->rttMs);
+            ++member->rttSamples;
+        }""", "round trip sample")
+
+    text = _replace_once(text, "void Start() {", """// Frames between sampling a controller and that input taking effect on every device.
+//
+// A client's input has to reach the host before the host can run the frame, and in a three or four
+// player session the host relays it on, so it crosses two one-way trips before the other clients
+// have it. The buffer must cover that longest path plus the jitter measured while the room was
+// open, and it must round up: a buffer that rounds down is a buffer that stalls. One extra frame
+// absorbs scheduling. For two players this lands on Dolphin's rule of thumb (about one buffer frame
+// per 16 ms of ping, plus one for spikes).
+static uint32_t InputDelayFrames(uint32_t worstRttMs, uint32_t jitterMs, uint32_t players) {
+    constexpr double kFrameMs = 1000.0 / 59.94;
+    const double oneWayMs = worstRttMs * 0.5;
+    const double pathMs = players > 2 ? oneWayMs * 2.0 : oneWayMs;
+    const int frames = static_cast<int>(std::ceil((pathMs + static_cast<double>(jitterMs) + 8.0) / kFrameMs)) + 1;
+    return static_cast<uint32_t>(std::clamp(frames, 2, 20));
+}
+
+void Start() {""", "Start()")
+
+    text = _replace_once(text, """    uint32_t worstRtt = 0;
+    for (size_t i = 0; i < s.members.size(); ++i) {
+        s.members[i].slot = static_cast<uint8_t>(i + 1);
+        s.members[i].chunks.assign((blob.size() + kChunk - 1) / kChunk, false);
+        s.members[i].started = s.members[i].ready = false;
+        worstRtt = std::max(worstRtt, s.members[i].rttMs);
+    }
+    plan.players = static_cast<uint8_t>(1 + s.members.size());
+    plan.localSlot = 0;
+    // Enough frames of input delay to cover half a round trip (clients' input goes through the host).
+    plan.inputDelay = std::clamp<uint32_t>((worstRtt / 2 + 12 + 16) / 17, 2, 8);""",
+    """    uint32_t worstRtt = 0;
+    uint32_t worstJitter = 0;
+    for (size_t i = 0; i < s.members.size(); ++i) {
+        s.members[i].slot = static_cast<uint8_t>(i + 1);
+        s.members[i].chunks.assign((blob.size() + kChunk - 1) / kChunk, false);
+        s.members[i].started = s.members[i].ready = false;
+        worstRtt = std::max(worstRtt, s.members[i].rttMs);
+        if (s.members[i].rttSamples > 1) {
+            worstJitter = std::max(worstJitter, s.members[i].rttMaxMs - s.members[i].rttMinMs);
+        }
+    }
+    plan.players = static_cast<uint8_t>(1 + s.members.size());
+    plan.localSlot = 0;
+    // Enough frames of input delay to cover the longest path an input takes, plus its jitter. Too
+    // small is not "lower latency": the frame simply waits, everyone freezes, and then the frames
+    // run back to back to catch up, which is what stutter looks like in a lockstep session.
+    plan.inputDelay = InputDelayFrames(worstRtt, worstJitter, plan.players);
+    if (const int32_t manual = RuntimeConfigFile::NetplayInputDelay(); manual > 0) {
+        plan.inputDelay = static_cast<uint32_t>(manual);
+    }""", "delay sizing")
+
+    text = _replace_once(text, """    RT_LOGF(RT_TAG_RUNTIME, "netplay: starting session %llu with %u players, input delay %u (worst RTT %u ms)\\n",
+            static_cast<unsigned long long>(plan.sessionId), plan.players, plan.inputDelay, worstRtt);""",
+    """    RT_LOGF(RT_TAG_RUNTIME,
+            "netplay: starting session %llu with %u players, input delay %u frames (worst RTT %u ms, jitter %u ms%s)\\n",
+            static_cast<unsigned long long>(plan.sessionId), plan.players, plan.inputDelay, worstRtt, worstJitter,
+            RuntimeConfigFile::NetplayInputDelay() > 0 ? ", set by hand" : "");""", "session log line")
+
+    write(lobby, text)
+
+    session = repo / "runtime/src/netplay/netplay_session.cpp"
+    text = read(session)
+    text = _replace_once(text, "    s.waitingFor = -1;", """    s.waitingFor = -1;
+    if (waited) {
+        // Waiting for the network leaves the pacing anchor in the past, so the frames that follow
+        // would run back to back to "catch up" with it. Resume from now instead: the session stays
+        // in step without the visible burst.
+        DetClock::ResetPacing();
+    }""", "session wait return")
+    write(session, text)
+
+    config = repo / "runtime/include/runtime_config.h"
+    text = read(config)
+    text = _replace_once(text, "    std::optional<int32_t> muteHotkey;", """    std::optional<int32_t> muteHotkey;
+    // Netplay: frames of input delay to ask for, 0 or unset = sized from the measured round trip and
+    // jitter when a session starts. [netplay] input_delay; see InputDelayFrames in netplay_lobby.cpp.
+    std::optional<int32_t> netplayInputDelay;""", "config field")
+    text = _replace_once(text, """    if (auto value = FindConfigInt(document, "controller", "button_layout"); value && *value >= 0 && *value <= 3) {
+        config.buttonLayout = *value;
+    }""", """    if (auto value = FindConfigInt(document, "controller", "button_layout"); value && *value >= 0 && *value <= 3) {
+        config.buttonLayout = *value;
+    }
+    if (auto value = FindConfigInt(document, "netplay", "input_delay"); value && *value >= 0 && *value <= 20) {
+        config.netplayInputDelay = *value;
+    }""", "config parse")
+    text = _replace_once(text, """inline bool SetButtonLayout(int32_t value) {
+    Mutable().buttonLayout = value;
+    return WriteSetting("controller", "button_layout", std::to_string(value));
+}""", """inline bool SetButtonLayout(int32_t value) {
+    Mutable().buttonLayout = value;
+    return WriteSetting("controller", "button_layout", std::to_string(value));
+}
+
+inline int32_t NetplayInputDelay(int32_t fallback = 0) {
+    return Get().netplayInputDelay.value_or(fallback);
+}
+
+inline bool SetNetplayInputDelay(int32_t value) {
+    Mutable().netplayInputDelay = value;
+    return WriteSetting("netplay", "input_delay", std::to_string(value));
+}""", "config accessors")
+    write(config, text)
+
+    overlay = repo / "runtime/src/settings_overlay.cpp"
+    text = read(overlay)
+    text = _replace_once(text, """    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "LAN play is in beta: rooms can fail to start or drop.");
+    ImGui::Separator();""", """    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "LAN play is in beta: rooms can fail to start or drop.");
+    // The one knob that decides whether a lockstep session is smooth or stutters: how many frames of
+    // input to hold back so a late packet does not stop the game for everyone.
+    int delay = RuntimeConfigFile::NetplayInputDelay();
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderInt("Input delay", &delay, 0, 20, delay == 0 ? "auto" : "%d frames");
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        RuntimeConfigFile::SetNetplayInputDelay(delay);
+    }
+    ImGui::TextDisabled("Auto sizes it from the room's ping and jitter. Raise it if the game hitches and");
+    ImGui::TextDisabled("then skips ahead; lower it if every button feels late. Read when a room starts.");
+    ImGui::Separator();""", "LAN settings")
+    write(overlay, text)
+
+    report.append("netplay input buffer sized from ping, jitter and player count")
+
+
 
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -358,6 +533,7 @@ def main() -> None:
     patch_labels(repo, report)
     patch_label_config(repo, report)
     patch_lan_beta(repo, report)
+    patch_netplay_latency(repo, report)
     if disc is not None:
         patch_variant_hash(repo, disc, report)
     for line in report:

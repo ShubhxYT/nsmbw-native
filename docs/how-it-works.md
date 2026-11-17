@@ -42,6 +42,7 @@ Windows. Upstream calls it WiiCompiled; the output binary keeps that name.
 | macOS netplay restart | Upstream relaunches the process to enter a LAN session, but only has Windows/Android/Linux branches — on macOS it fell through to `_Exit(0)`, killing every session. |
 | Button labels | PlayStation / Xbox / Nintendo naming, selected in F10, saved as `[controller] button_layout`. |
 | LAN beta label | Rooms can fail to start; the player is told before joining one. |
+| Input buffer | Lockstep can only run as fast as the slowest input, so the buffer must cover the real ping and jitter. It was half the round trip plus a fixed 12 ms, rounded down, capped at 8 frames — too small for anything past a LAN, which shows up as a hitch followed by frames skipping to catch up. |
 
 **4. The packaging.** On macOS the app is self-contained: binary, `dsp_coef.bin`, pipeline cache,
 bootstrap NAND seeds and the whole extracted disc live inside `Contents/Resources`, and the launcher
@@ -63,3 +64,10 @@ A session copies the host's save into a per-session NAND, restarts both programs
 in lockstep with an input delay. On exit the host's session save is copied back over its own save; a
 host that was killed has it recovered at next launch. Joiners keep no save — the host's world is the
 session.
+
+Because it is lockstep, latency is a buffer, not a prediction: every device must hold each frame until
+every player's input for it has arrived. The buffer is sized when the room starts from the worst
+measured round trip and its spread, plus one extra one-way trip in three and four player sessions
+(the host relays a client's input on to the others). Too small and the frame waits, everyone freezes
+for a moment, and then the frames that were already waiting run back to back — that burst is the
+"skipping to catch up" players notice. It can be set by hand in F10 › LAN.

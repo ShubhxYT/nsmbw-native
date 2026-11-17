@@ -70,13 +70,14 @@ compiles, so a second build takes minutes instead of ~20–30.
   layout: right A, bottom B, top X, left Y). Mappings persist per device.
 - **LAN play is beta.** Rooms are found on your Wi-Fi automatically; Tailscale works for remote
   players and needs no port forwarding. Expect rooms that fail to start or drop — the game says so
-  on the LAN screen.
+  on the LAN screen. If a remote session hitches and then skips ahead, raise **F10 › LAN › Input
+  delay**; if everything feels late, lower it. Auto sizes it from the room's ping and jitter.
 - Saves: `~/Library/Application Support/WiiCompiled/NAND` (macOS),
   `%USERPROFILE%\Documents\MarioWiiSaveData\NAND` (Windows).
 
 ## What the scripts fix
 
-The port needs four changes on top of the upstream sources. `apply-patches.py` applies them
+The port needs five changes on top of the upstream sources. `apply-patches.py` applies them
 idempotently and reports each one, so reruns are safe:
 
 1. **Boot hang at the disc's BCA check.** `DVDCheckDiskBca` waits for a DI interrupt no host raises,
@@ -86,6 +87,10 @@ idempotently and reports each one, so reruns are safe:
    LAN session died at `restarting into session`.
 3. **Button-label families** (PlayStation / Xbox / Nintendo) with the F10 picker.
 4. **LAN labelled beta** wherever the player meets it.
+5. **Online input buffer sized from the link.** The lockstep buffer was half the ping plus a guessed
+   12 ms, rounded down and capped at 8 frames, which stalls on any real connection and then skips
+   frames to catch up. It now covers the measured ping and jitter, the player count, and can be set
+   by hand in F10 › LAN (`[netplay] input_delay`).
 
 If your dump's `main.dol` differs from the table's, the scripts record its checksum instead of
 refusing it — disc ID, revision, FST size, entry point and the REL prelink still validate the dump.
