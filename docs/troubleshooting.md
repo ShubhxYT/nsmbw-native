@@ -1,0 +1,106 @@
+# Troubleshooting
+
+Everything here was met while building this, on a Mac and on a Windows 11 machine.
+
+## The game hangs at boot, or a black window with 0 frames
+
+Two different causes, both seen:
+
+**"0 guest frame(s) presented, VI black=1" in the log.** On Windows, launching the exe from an SSH
+session (or any non-interactive session) fails to create a Direct3D swap chain:
+
+```
+[aurora] WebGPU device was lost: Creating the IDXGISwapChain1 failed with
+         DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)
+```
+
+That is the launch context, not the game. Start it from the desktop shortcut inside your logged-on
+session and it runs normally.
+
+**A silent spin after the engine initialises.** If the runtime log stops after `NW4R - EF` and the
+process sits at ~100% of one core, the BCA patch is missing. Confirm with
+`python3 apply-patches.py <repo>` — it should report "BCA check answered natively".
+
+## `sys/main.dol differs from the clean ... executable`
+
+The scripts handle this: they record your dump's checksum and continue, after checking the disc ID,
+revision, FST size and entry point. A difference usually means a patched executable. If the game later
+misbehaves at a consistent spot, that mismatch is suspect #1 — try a clean dump of the same version.
+
+## `No .NET SDKs were found` / `NU1100: Unable to resolve ...`
+
+The translator is a .NET 8 program.
+
+```powershell
+winget install Microsoft.DotNet.SDK.8
+```
+
+`NU1100` on every package means the machine has **no NuGet sources** even though nuget.org is
+reachable. Check and repair:
+
+```powershell
+dotnet nuget list source
+dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
+```
+
+Both scripts now do this automatically when the list is empty.
+
+## Windows: `No pinned sources in ...\Dependencies`
+
+`Prepare-Dependencies.ps1` resolves a relative `-Destination` against its own folder, so the packages
+land next to the script instead of in the checkout. The Windows script passes an absolute path now. If
+you hit it with an older copy, move the folder:
+
+```powershell
+Move-Item <scripts>\Dependencies <repo>\Dependencies
+```
+
+## macOS: `metal: command not found` / shaders fail to compile
+
+The Metal toolchain is a separate download in recent Xcode:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+```
+
+## Build is very slow
+
+The first build is: translate ~39k functions, compile ~200 MB of generated C++, plus Dawn and SDL3.
+Roughly 20–30 minutes on an M4 Pro or an i9-13900H, and the toolchain download on Windows adds to
+that. Reruns reuse everything unchanged — a second build is a couple of minutes.
+
+If it looks stuck, check the stage: `logs/` in the work folder has one log per stage
+(`configure.log`, `build.log`, `translate.log`, ...). On Windows also check
+`projects\nsmbw\tools\rebuild-*.log` inside the checkout.
+
+## LAN play: rooms are not found, or fail to start
+
+LAN play is **beta**.
+
+- Both players must be on the same build and the same game version.
+- Discovery is UDP broadcast on **52130**; a firewall blocking it stops rooms from appearing. For
+  remote play, use Tailscale — the lobby asks `tailscale status` for peers by itself, and you can add a
+  device by hand under F10 › LAN.
+- A room that lists but will not start usually means one side failed the session restart. On macOS
+  that was an upstream gap; the patch in this repo fixes it. Run
+  `apply-patches.py <repo>` and check it reports "macOS netplay restart added".
+- Only the host keeps progress: a session plays on the host's save, and it is written back when the
+  host leaves (or recovered at next launch if it was killed).
+
+## Controllers
+
+- A pad is picked up automatically when connected; mappings persist per device.
+- If the wrong pad is player 1, unplug/disable the other one, or press a button on the one you want
+  to use first.
+- Wrong button names? F10 › Controls › *Show names as* forces PlayStation, Xbox or Nintendo labelling.
+
+## Saves and logs
+
+| | |
+|---|---|
+| macOS saves | `~/Library/Application Support/WiiCompiled/NAND` |
+| macOS logs | `~/Library/Application Support/WiiCompiled/Logs/<run>/console.log` |
+| Windows saves | `%USERPROFILE%\Documents\MarioWiiSaveData\NAND` |
+| Windows logs | `%USERPROFILE%\Documents\MarioWiiSaveData\Logs\<run>\console.log` |
+
+Back up the save before testing new builds. `wiimj2d.sav` is the file that matters.
