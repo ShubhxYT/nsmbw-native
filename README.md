@@ -56,23 +56,19 @@ unchanged compiles, so a second build takes minutes instead of ~20–30.
 
 ### iPad / iPhone
 
-The iOS build is the same sources with one extra patch, and it is not a one-command build yet.
-The full instructions — configure flags, the pinned Dawn iOS archive, packaging and installing —
-are in **[docs/ios.md](docs/ios.md)**. In short:
-
 ```bash
-python3 apply-patches.py <checkout>
-git -C <checkout> apply patches/ios-port.patch
-cmake -S <checkout>/runtime -B <checkout>/build-ios -G Ninja \
-  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 -DCMAKE_BUILD_TYPE=Release \
-  -DAURORA_DAWN_PROVIDER=package -DAURORA_DAWN_LINKAGE=static \
-  -DAURORA_DAWN_PACKAGE_URL="https://github.com/encounter/dawn-build/releases/download/v20260603.191052/dawn-ios-arm64.tar.gz" \
-  -DAURORA_DAWN_PACKAGE_URL_HASH="SHA256=a361fcca75929fa5c766cfcde979c010a6da7d805e5db8e15c75e73fd8260e78" \
-  -DMKW_TRANSLATED_SHARD_MANIFEST=<checkout>/generated/build_shards/shards.cmake
-cmake --build <checkout>/build-ios --target WiiCompiled --parallel "$(sysctl -n hw.ncpu)"
-./ios/package-ipa.sh <checkout>/build-ios/WiiCompiled.app <game folder> ~/Downloads/NSMBW.ipa 1
+./make-nsmbw-ios.sh --disc "/path/to/New Super Mario Bros. Wii (USA) (Rev 1).rvz" --version 1
 ```
+
+You get `~/wii-port/nsmbw-ios-build/New Super Mario Bros. Wii v1.ipa` — unsigned, for LiveContainer
+or SideStore. It runs the same translation stage the desktop scripts use, then configures the same
+sources for arm64 iOS, builds, and packs the IPA with its game data and icon.
+
+Needs Xcode with an iOS SDK, CMake and Ninja. Reruns are resumable; `--no-translate` reuses sources
+that are already translated, and `--configure-only` stops after CMake when something looks wrong.
+
+The details — what the iOS patch changes and why, the pinned Dawn archive, installing, on-device
+paths and the two open gaps — are in **[docs/ios.md](docs/ios.md)**.
 
 ### Useful options
 

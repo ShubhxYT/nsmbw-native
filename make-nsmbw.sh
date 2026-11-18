@@ -25,6 +25,7 @@
 #   --icon PNG        app icon (any size)                   [optional]
 #   --jobs N          parallel compile jobs                 [default: all cores]
 #   --no-app          stop after the binary, skip the .app
+#   --translate-only  stop after the translated sources (the iOS build uses this)
 #   --clean           delete <out> first (asks nothing)
 #   -h, --help        this text
 #
@@ -43,6 +44,7 @@ ICON=""
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 MAKE_APP=1
 CLEAN=0
+TRANSLATE_ONLY=0
 
 die()  { printf '\n\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --icon)      ICON="${2:-}"; shift 2 ;;
         --jobs)      JOBS="${2:-}"; shift 2 ;;
         --no-app)    MAKE_APP=0; shift ;;
+        --translate-only) TRANSLATE_ONLY=1; shift ;;
         --clean)     CLEAN=1; shift ;;
         -h|--help)   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)           die "unknown option: $1 (try --help)" ;;
@@ -177,6 +180,13 @@ run_tr generate-data-init --project projects/nsmbw/recomp.yml
 run_tr emit-build-shards --project projects/nsmbw/recomp.yml --base-metadata generated/base_translation_output.json \
     --base-functions-dir generated/functions --native-source-dir runtime/src --out generated/build_shards
 ok "build shards emitted"
+
+if [[ $TRANSLATE_ONLY -eq 1 ]]; then
+    step "Done"
+    info "translated sources: $REPO/generated/build_shards"
+    info "next: build them for the target platform (make-nsmbw.sh for an app, make-nsmbw-ios.sh for an IPA)"
+    exit 0
+fi
 
 step "Compiling the runtime (this is the long one)"
 mkdir -p "$BUILD_DIR"

@@ -18,6 +18,33 @@ Two known gaps, both listed at the end.
 - Your own disc, extracted exactly as for the Mac app (`sys/` + `files/`).
 
 ## Build
+## One command
+
+```bash
+./make-nsmbw-ios.sh --disc "/path/to/New Super Mario Bros. Wii (USA) (Rev 1).rvz" --version 1
+```
+
+That is the whole build: it clones the upstream sources, applies this repository's fixes and the iOS
+patch, extracts the disc, translates, configures for arm64 iOS, compiles, and writes
+`~/wii-port/nsmbw-ios-build/New Super Mario Bros. Wii v1.ipa`.
+
+| Option | Meaning |
+|---|---|
+| `--disc-dir DIR` | reuse an already extracted disc (`sys/` + `files/`) |
+| `--out DIR` | work and output folder (`~/wii-port/nsmbw-ios-build`) |
+| `--repo DIR` | reuse an existing checkout |
+| `--version N` | version in the file name and in the app |
+| `--no-translate` | skip the translator, reuse `<repo>/generated` |
+| `--configure-only` | stop after the CMake configure |
+| `--clean` | wipe the work folder first |
+
+Reruns are resumable: a second build with unchanged sources skips translation, configure and the
+unchanged compiles, and takes a couple of minutes.
+
+## The same build, step by step
+
+Useful when something fails, or when wiring this into another script. The one-command build above does
+exactly this.
 
 ```bash
 # 1. Get the upstream sources the other platforms use, then apply this repository's fixes
