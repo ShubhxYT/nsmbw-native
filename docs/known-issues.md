@@ -28,10 +28,11 @@ The map is starting a layout animation on an object whose resource pointer is st
 state, not host state: the game's own world-map state machine is reaching that call with a pointer
 it should have been given at load time.
 
-**Not network play.** Both devices in the session logged the same scene transitions and stopped on
-the same guest frame (`34093`) at the same instruction with the same fault address. A lockstep
-session cannot make two machines diverge like that — both executed the same instruction on the same
-memory, so the same input is enough to hit it offline. It should reproduce in single player.
+**Not network play.** Both devices logged the identical scene history and reached the same guest
+frame (`34093`); the macOS side then logged the fault above and the Windows side's log stops at that
+same transition. Two machines in lockstep do not diverge on their own, so the same inputs are enough
+to reach this state offline — it should reproduce in single player. (Only the Mac produced a fault
+dump; the Windows process was closed with the session.)
 
 **Not fixed yet, and why.** There is no crash dump to diff and no reliable reproduction. A fix means
 finding what the world map expects to have been initialised (most likely the animation resource for
