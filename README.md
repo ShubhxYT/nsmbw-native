@@ -13,6 +13,7 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
 | **Windows** | ✅ tested — Windows 11 x64, ~58 fps, D3D12 |
 | **Game version** | USA, `SMNE01`, revision 1 |
 | **LAN play** | ⚠️ beta |
+| **Known issue** | ⚠️ world-map crash after a course ends — [details](docs/known-issues.md) |
 
 <p align="center"><img src="docs/screenshot-world-1-1.png" alt="World 1-1 running natively" width="720"></p>
 
@@ -103,6 +104,8 @@ misbehaves.
 - [docs/how-it-works.md](docs/how-it-works.md) — the pipeline stage by stage.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — every failure met while building this, with
   the fix.
+- [docs/known-issues.md](docs/known-issues.md) — open bugs, including a world-map crash after a
+  course ends that is not fixed yet.
 
 ## Legal
 
