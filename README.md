@@ -17,7 +17,7 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
 | **Known issue** | ⚠️ world-map crash after a course — [details](docs/known-issues.md) |
 | **iOS gyro** | ⚠️ controller motion does not reach the app; L1/R1 tilt instead — [details](docs/ios.md#known-gaps) |
 
-<p align="center"><img src="docs/screenshot-world-1-1.png" alt="World 1-1 running natively" width="720"></p>
+<p align="center"><img src="docs/ipad-livecontainer.gif" alt="New Super Mario Bros. Wii installed in LiveContainer on an iPad" width="720"></p>
 
 ## What you need
 
