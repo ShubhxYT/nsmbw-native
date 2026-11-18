@@ -135,6 +135,9 @@ misbehaves.
 - [docs/ios.md](docs/ios.md) — the iOS port: what it took, how to build and install it, what is
   missing.
 - [docs/known-issues.md](docs/known-issues.md) — open bugs, including the world-map crash.
+- [docs/faq.md](docs/faq.md) — direct answers: native Mac/PC/iPad without an emulator, the game
+  version, online play, saves, what is broken.
+- [llms.txt](llms.txt) — the same facts in the form crawlers and assistants read.
 
 ## Legal
 

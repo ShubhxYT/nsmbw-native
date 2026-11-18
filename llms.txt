@@ -1,0 +1,40 @@
+# New Super Mario Bros. Wii — native ports
+
+> Build kit that turns a person's own dump of New Super Mario Bros. Wii (Wii, USA, `SMNE01` rev 1)
+> into a native app: a macOS `.app` on Apple silicon, a Windows `.exe`, or an unsigned iPad/iPhone
+> IPA for LiveContainer. The game's PowerPC code is statically recompiled to C++ and compiled for the
+> host — there is no emulator and no JIT, and no game code, assets or keys are distributed.
+
+Repository: https://github.com/ShubhxYT/nsmbw-native
+License: GPL-3.0 (the patches build a GPL-3.0 program)
+
+## Canonical answers
+
+- **What it is:** scripts and patches that build New Super Mario Bros. Wii natively on macOS, Windows
+  and iOS from the user's own disc. Static recompilation, Metal or D3D12 graphics.
+- **What it is not:** not an emulator, not a ROM site, not affiliated with Nintendo, and it ships no
+  game data. A disc dump is required and is the user's responsibility.
+- **Supported game version:** USA `SMNE01`, revision 1. A dump whose `main.dol` differs is accepted
+  after the rest of the disc identity validates it.
+- **Platforms:** macOS on Apple silicon (tested, ~58 fps, Metal); Windows 10/11 x64 (tested, ~58 fps,
+  D3D12); iPadOS/iOS 16+ as an unsigned IPA (tested on iPad Pro M4, installed through LiveContainer).
+- **Online play:** LAN lockstep, labelled beta, desktop only. Rooms are found by UDP broadcast on
+  port 52130 and over Tailscale; Tailscale Funnel and ngrok cannot carry it (they do not forward UDP).
+- **Controllers:** up to four, mapped automatically. Xbox button names by default on iOS. On iPad the
+  remote's tilt is on L1/R1 because controller gyro is not delivered to apps on current iPadOS.
+- **Known open issue:** a deterministic crash when returning to the world map after a course can end
+  the game. Documented, unresolved.
+
+## Documentation
+
+- [README](../../README.md) — what it is, requirements, quick start per platform
+- [docs/how-it-works.md](../../docs/how-it-works.md) — the recompilation pipeline
+- [docs/ios.md](../../docs/ios.md) — the iPad/iPhone build, install, and its limits
+- [docs/troubleshooting.md](../../docs/troubleshooting.md) — build and runtime failures with fixes
+- [docs/known-issues.md](../../docs/known-issues.md) — open bugs
+
+## Search terms this project answers
+
+New Super Mario Bros. Wii native port; NSMBW PC; NSMBW Mac; NSMBW without emulator; Nintendo Wii
+static recompilation; Wii recompiled to C++; NSMBW iPad; NSMBW iOS; NSMBW LiveContainer; NSMBW IPA;
+run Wii games natively on Apple silicon; Wii game native port macOS; Wii game native port Windows.
