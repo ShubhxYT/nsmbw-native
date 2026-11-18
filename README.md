@@ -1,19 +1,21 @@
-# New Super Mario Bros. Wii — native macOS & Windows build kit
+# New Super Mario Bros. Wii — native macOS, Windows & iPad build kit
 
-Two scripts that turn **your own copy** of New Super Mario Bros. Wii into a native app: a `.app` on
-Apple silicon or a `.exe` folder on Windows. No emulator, no JIT — the game's PowerPC code is
-translated ahead of time to C++ and compiled for your machine, with the Wii's graphics rebuilt on
-Metal (macOS) or D3D12/Vulkan (Windows).
+Turn **your own copy** of New Super Mario Bros. Wii into a native app: a `.app` on Apple silicon, a
+`.exe` folder on Windows, or an unsigned IPA for an iPhone or iPad. No emulator, no JIT — the game's
+PowerPC code is translated ahead of time to C++ and compiled for your machine, with the Wii's
+graphics rebuilt on Metal or D3D12.
 
 This is a build kit, not a game. It contains no game code, no assets, no keys and no disc images.
 
-| | |
+| Platform | Status |
 |---|---|
 | **macOS** | ✅ tested — Apple silicon, ~58 fps, Metal |
 | **Windows** | ✅ tested — Windows 11 x64, ~58 fps, D3D12 |
+| **iPad / iPhone** | ✅ tested — iPad Pro M4, iPadOS 26, unsigned IPA via LiveContainer |
 | **Game version** | USA, `SMNE01`, revision 1 |
-| **LAN play** | ⚠️ beta |
-| **Known issue** | ⚠️ world-map crash after a course ends — [details](docs/known-issues.md) |
+| **LAN play** | ⚠️ beta (desktop only) |
+| **Known issue** | ⚠️ world-map crash after a course — [details](docs/known-issues.md) |
+| **iOS gyro** | ⚠️ controller motion does not reach the app; L1/R1 tilt instead — [details](docs/ios.md#known-gaps) |
 
 <p align="center"><img src="docs/screenshot-world-1-1.png" alt="World 1-1 running natively" width="720"></p>
 
@@ -25,7 +27,9 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
   (`xcodebuild -downloadComponent MetalToolchain`). The script installs nothing else by itself.
 - **Windows**: Windows 10/11 x64, [.NET 8 SDK](https://dot.net), Python 3 x64, git. The pinned
   compiler toolchain is downloaded by the build.
-- **Disk**: about 6 GB of free space per build (the finished app is ~460 MB).
+- **iPad / iPhone**: iPadOS or iOS 16+, a Mac with Xcode and an iOS SDK, and
+  [LiveContainer](https://github.com/LiveContainer/LiveContainer) (or SideStore) to install the IPA.
+- **Disk**: about 6 GB of free space per build (the finished app is ~460 MB; the IPA ~360 MB).
 
 ## Build it
 
@@ -47,8 +51,28 @@ inside the bundle) plus a Finder alias on your Desktop. Open it like any app.
 You get `...\nsmbw-build\dist\NSMBW-Windows\New Super Mario Bros. Wii.exe` next to its `game`
 folder and DLLs, plus a shortcut on your Desktop.
 
-Both scripts are **resumable**: rerunning skips the translation, CMake configure and unchanged
-compiles, so a second build takes minutes instead of ~20–30.
+Both desktop scripts are **resumable**: rerunning skips the translation, CMake configure and
+unchanged compiles, so a second build takes minutes instead of ~20–30.
+
+### iPad / iPhone
+
+The iOS build is the same sources with one extra patch, and it is not a one-command build yet.
+The full instructions — configure flags, the pinned Dawn iOS archive, packaging and installing —
+are in **[docs/ios.md](docs/ios.md)**. In short:
+
+```bash
+python3 apply-patches.py <checkout>
+git -C <checkout> apply patches/ios-port.patch
+cmake -S <checkout>/runtime -B <checkout>/build-ios -G Ninja \
+  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 -DCMAKE_BUILD_TYPE=Release \
+  -DAURORA_DAWN_PROVIDER=package -DAURORA_DAWN_LINKAGE=static \
+  -DAURORA_DAWN_PACKAGE_URL="https://github.com/encounter/dawn-build/releases/download/v20260603.191052/dawn-ios-arm64.tar.gz" \
+  -DAURORA_DAWN_PACKAGE_URL_HASH="SHA256=a361fcca75929fa5c766cfcde979c010a6da7d805e5db8e15c75e73fd8260e78" \
+  -DMKW_TRANSLATED_SHARD_MANIFEST=<checkout>/generated/build_shards/shards.cmake
+cmake --build <checkout>/build-ios --target WiiCompiled --parallel "$(sysctl -n hw.ncpu)"
+./ios/package-ipa.sh <checkout>/build-ios/WiiCompiled.app <game folder> ~/Downloads/NSMBW.ipa 1
+```
 
 ### Useful options
 
@@ -66,20 +90,23 @@ compiles, so a second build takes minutes instead of ~20–30.
 - **F10** opens settings: resolution (up to 8×), aspect (4:3 / **16:10** / 16:9 / fill), display mode
   (windowed / borderless / exclusive), audio, controls, and **button labels**.
 - **Button labels** can be forced to PlayStation, Xbox or Nintendo naming, and the choice is saved as
-  `[controller] button_layout` (`0` auto, `1` PlayStation, `2` Xbox, `3` Nintendo).
+  `[controller] button_layout` (`0` auto, `1` PlayStation, `2` Xbox, `3` Nintendo). The iOS build
+  defaults to Xbox names.
 - **Controllers**: connect a pad and it is picked up automatically and mapped by position (Switch
-  layout: right A, bottom B, top X, left Y). Mappings persist per device.
-- **LAN play is beta.** Rooms are found on your Wi-Fi automatically; Tailscale works for remote
-  players and needs no port forwarding. Expect rooms that fail to start or drop — the game says so
-  on the LAN screen. A session shows `N ms  delay N` at the top of the screen: the round trip and
-  the input delay in force. If a remote session hitches and then skips ahead, raise **F10 › LAN ›
-  Input delay**; if everything feels late, lower it. Auto sizes it from the room's ping and jitter.
+  layout: right A, bottom B, top X, left Y). Mappings persist per device. Four pads work.
+- **On iPad the remote's tilt is on L1/R1** (hold to roll left/right): the controller's own gyro is
+  not delivered to apps on current iPadOS. See [docs/ios.md](docs/ios.md#known-gaps).
+- **LAN play is beta** and desktop only. Rooms are found on your Wi-Fi automatically; Tailscale works
+  for remote players and needs no port forwarding. A session shows `N ms  delay N` at the top of the
+  screen: the round trip and the input delay in force. If a remote session hitches and then skips
+  ahead, raise **F10 › LAN › Input delay**; if everything feels late, lower it.
 - Saves: `~/Library/Application Support/WiiCompiled/NAND` (macOS),
-  `%USERPROFILE%\Documents\MarioWiiSaveData\NAND` (Windows).
+  `%USERPROFILE%\Documents\MarioWiiSaveData\NAND` (Windows), and on iOS
+  `Documents/WiiCompiled/NAND` inside the app's container.
 
 ## What the scripts fix
 
-The port needs five changes on top of the upstream sources. `apply-patches.py` applies them
+The desktop port needs five changes on top of the upstream sources. `apply-patches.py` applies them
 idempotently and reports each one, so reruns are safe:
 
 1. **Boot hang at the disc's BCA check.** `DVDCheckDiskBca` waits for a DI interrupt no host raises,
@@ -94,6 +121,11 @@ idempotently and reports each one, so reruns are safe:
    frames to catch up. It now covers the measured ping and jitter, the player count, and can be set
    by hand in F10 › LAN (`[netplay] input_delay`).
 
+The iOS build adds `patches/ios-port.patch` on top: an iOS platform branch, a launch-time guest
+memory base, a temp-file backing for guest RAM, the `UIApplicationMain` entry through SDL, in-bundle
+game data, static dependencies and the shoulder-tilt fallback. Each is explained in
+[docs/ios.md](docs/ios.md).
+
 If your dump's `main.dol` differs from the table's, the scripts record its checksum instead of
 refusing it — disc ID, revision, FST size, entry point and the REL prelink still validate the dump.
 A mismatch usually means a patched executable, and it is the first thing to suspect if a build
@@ -104,8 +136,9 @@ misbehaves.
 - [docs/how-it-works.md](docs/how-it-works.md) — the pipeline stage by stage.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — every failure met while building this, with
   the fix.
-- [docs/known-issues.md](docs/known-issues.md) — open bugs, including a world-map crash after a
-  course ends that is not fixed yet.
+- [docs/ios.md](docs/ios.md) — the iOS port: what it took, how to build and install it, what is
+  missing.
+- [docs/known-issues.md](docs/known-issues.md) — open bugs, including the world-map crash.
 
 ## Legal
 
@@ -121,4 +154,7 @@ The scripts are GPL-3.0 because they patch and build a GPL-3.0 program.
   runtime and everything that actually runs the game.
 - [encounter/nod](https://github.com/encounter/nod) — `nodtool`, used to extract the disc.
 - [aurora](https://github.com/encounter/aurora) and [Dawn](https://dawn.googlesource.com/dawn) — the
-  graphics layer behind Metal/D3D12.
+  graphics layer behind Metal/D3D12, and the prebuilt Dawn for iOS arm64 used by the iPad build.
+- [SDL3](https://github.com/libsdl-org/SDL) — window, audio, controllers and the iOS app lifecycle.
+- [LiveContainer](https://github.com/LiveContainer/LiveContainer) — how the IPA is installed without
+  a developer account.

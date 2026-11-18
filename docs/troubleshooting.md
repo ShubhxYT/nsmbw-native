@@ -138,3 +138,21 @@ LAN play is **beta**.
 | Windows logs | `%USERPROFILE%\Documents\MarioWiiSaveData\Logs\<run>\console.log` |
 
 Back up the save before testing new builds. `wiimj2d.sav` is the file that matters.
+
+## iOS
+
+The iOS port hit its own set of failures. All of them are fixed by `patches/ios-port.patch`; they are
+listed here because the messages are cryptic and each one means something specific.
+
+| Message | Cause | Fix in the patch |
+|---|---|---|
+| `memfd_create for guest RAM failed (Operation not permitted)` | iOS has no `memfd_create`, and the POSIX shared-memory fallback is denied inside the app sandbox | guest RAM is an unlinked file in the app's `TMPDIR` |
+| `'IOSurface/IOSurface.h' file not found` | that umbrella header is macOS only | iOS uses `IOSurfaceRef.h` |
+| `mach_vm.h unsupported` | iOS forbids the Mach VM API | the portable `mmap`/`mprotect` path is used instead |
+| `'CoreAudio/CoreAudio.h' file not found` | iOS has no Core Audio process-object graph | the external-audio query is stubbed |
+| app exits with no window | `SDL_MAIN_HANDLED` means nothing sets up `UIApplicationMain` | `main` calls `SDL_RunApp` |
+| `@rpath/libpng16.dylib` not found on device | a dependency was built shared | dependencies are static for iOS |
+| black screen, no game window | the runtime died before SDL started | read `Documents/WiiCompiled/Logs/<run>/console.log`; the last line names it |
+
+The log's first line is `[runtime] WiiCompiled <version>`, from `build-fingerprint.json` in the
+bundle, so a pasted log always says which build produced it.

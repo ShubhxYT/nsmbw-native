@@ -71,3 +71,19 @@ measured round trip and its spread, plus one extra one-way trip in three and fou
 (the host relays a client's input on to the others). Too small and the frame waits, everyone freezes
 for a moment, and then the frames that were already waiting run back to back — that burst is the
 "skipping to catch up" players notice. It can be set by hand in F10 › LAN.
+
+## The iOS build
+
+iOS runs the same translated code and the same runtime; three things differ, and each is explained in
+[ios.md](ios.md):
+
+- **Guest memory is based at launch, not at build time.** The generated code addresses guest memory
+  through `MemoryInline::FlatRead32(offset)`, so the base is one macro. Desktop keeps it a constant;
+  iOS reserves the arena wherever the kernel allows and publishes that address.
+- **Guest RAM is an unlinked file** in the app's own temporary directory: iOS has no `memfd_create`
+  and denies POSIX shared-memory objects, and the design needs one backing store mapped twice.
+- **SDL owns the app lifecycle.** The product sets `SDL_MAIN_HANDLED`, so on iOS `main` hands control
+  to `SDL_RunApp`, which runs `UIApplicationMain` and calls back into the runtime.
+
+The app carries its disc data in the bundle (`game/`), writes config, logs and saves to
+`Documents/WiiCompiled`, and is packaged as an unsigned IPA for LiveContainer.

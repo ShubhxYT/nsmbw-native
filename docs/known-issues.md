@@ -58,6 +58,52 @@ so the trigger depends on map state, not simply on returning.
 (`runtime/src/hle/pause_exit.cpp`). It is a candidate to bisect — disabling it is the cheapest way
 to check whether the extra exit path is what leaves the map in this state.
 
+## Controller gyro does not reach the app on iPadOS
+
+**Status:** open, and not specific to this port.
+
+A DualShock 4 or DualSense connected to an iPad delivers buttons, sticks and rumble, but no motion
+data: `GCController.motion` never produces samples for the app. The game's shaking and tilting
+gestures therefore do nothing.
+
+Evidence that this is the platform, not this build:
+
+- [Moonlight iOS issue #725](https://github.com/moonlight-stream/moonlight-ios/issues/725) — open
+  since September 2026, reported on **iPadOS 27**: *"standard controls … and rumble function
+  normally, gyro data (`GCMotion`) is not forwarded"*, and the reporter notes the app's source does
+  handle `GCMotion`.
+- [Moonlight PR #664](https://github.com/moonlight-stream/moonlight-ios/pull/664) — the community
+  workaround is to use the **device's** gyro through CoreMotion, because the controller's is not
+  available.
+
+What this port does instead: **L1 / R1 roll the emulated remote** left and right, which is what the
+tilting platforms and the other motion-driven spots read.
+
+What would move it forward: a build that reads `GCController.motion` directly (bypassing SDL) and
+logs raw samples. That has not been attempted here, because the reports above show mature apps doing
+exactly that and still receiving nothing on current iPadOS.
+
+## LiveContainer replaces the app's data container when the app is reinstalled
+
+**This is not a bug in the port, but it loses saves if you are not ready for it.**
+
+Under LiveContainer an app's data lives in `Data/Application/<uuid>/Documents/…`. Installing an IPA
+over an existing install replaces that container: the app is given a new UUID, its data is migrated
+into it, and the old container is deleted. Anything that lived only inside the old container is
+gone — including, if the migration does not cover it, save files.
+
+**Keep backups outside that folder.** Copy the save somewhere of your own (a folder such as
+`Blip/` in the same container, or iCloud Drive) after a session:
+
+| Platform | Save to copy |
+|---|---|
+| iPad / iPhone | `Documents/WiiCompiled/NAND/title/00010000/534d4e45/data/wiimj2d.sav` |
+| macOS | `~/Library/Application Support/WiiCompiled/NAND/title/00010000/534d4e45/data/wiimj2d.sav` |
+| Windows | `%USERPROFILE%\Documents\MarioWiiSaveData\NAND\title\00010000\534d4e45\data\wiimj2d.sav` |
+
+The world map writes the save when a course ends, so copy it after returning to the map rather than
+mid-course.
+
 ## LAN play is beta
 
 Rooms can fail to start or drop. See [troubleshooting.md](troubleshooting.md#lan-play-rooms-are-not-found-or-fail-to-start)

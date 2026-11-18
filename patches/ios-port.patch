@@ -1,0 +1,343 @@
+--- /Users/shubhmac/wii-port/nsmb-wither/aurora-main/lib/webgpu/metalfx.mm	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/aurora-main/lib/webgpu/metalfx.mm	2026-11-18 17:24:23
+@@ -1,7 +1,13 @@
+ #include "metalfx.hpp"
+ 
+ #import <Foundation/Foundation.h>
++#if TARGET_OS_IPHONE
++// iOS ships the IOSurface headers without the macOS umbrella header.
++#import <IOSurface/IOSurfaceRef.h>
++#import <IOSurface/IOSurfaceObjC.h>
++#else
+ #import <IOSurface/IOSurface.h>
++#endif
+ #import <Metal/Metal.h>
+ #import <MetalFX/MetalFX.h>
+ 
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/CMakeLists.txt	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/CMakeLists.txt	2026-11-18 18:37:34
+@@ -28,6 +28,10 @@
+ 
+ if(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+     set(MKW_PLATFORM_WINDOWS TRUE)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|ARM64)$")
++    set(MKW_PLATFORM_IOS TRUE)
++    # Everything the app needs must be inside the bundle: no dylibs to load at an @rpath.
++    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm64|ARM64)$")
+     set(MKW_PLATFORM_MACOS TRUE)
+     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+@@ -255,7 +259,7 @@
+         set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_METAL OFF CACHE BOOL "" FORCE)
+         set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
+-    elseif(MKW_PLATFORM_MACOS)
++    elseif(MKW_PLATFORM_MACOS OR MKW_PLATFORM_IOS)
+         set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_METAL ON CACHE BOOL "" FORCE)
+@@ -298,6 +302,24 @@
+     set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+     # Isolate aurora build products to a subdirectory under the main build dir.
+     add_subdirectory(${MKW_AURORA_DIR} ${CMAKE_BINARY_DIR}/aurora-build EXCLUDE_FROM_ALL)
++
++    if(MKW_PLATFORM_IOS)
++        # SDL's iOS joystick backend declares the controller's accelerometer but never turns it on.
++        # DualShock 4 and DualSense require manual activation on iOS, so motion stays dormant and
++        # the game gets no tilt or shake. Activate it as the controller opens.
++        set(MKW_SDL_MFI "${CMAKE_BINARY_DIR}/_deps/sdl-src/src/joystick/apple/SDL_mfijoystick.m")
++        if(EXISTS "${MKW_SDL_MFI}")
++            file(READ "${MKW_SDL_MFI}" _mkw_mfi)
++            if(NOT _mkw_mfi MATCHES "sensorsRequireManualActivation")
++                string(REPLACE
++                    "            if (motion && motion.hasRotationRate) {"
++                    "            if (motion && motion.sensorsRequireManualActivation) {\n                motion.sensorsActive = YES;\n            }\n            if (motion && motion.hasRotationRate) {"
++                    _mkw_mfi "${_mkw_mfi}")
++                file(WRITE "${MKW_SDL_MFI}" "${_mkw_mfi}")
++                message(STATUS "ios: SDL controller motion activated at connect")
++            endif()
++        endif()
++    endif()
+     set(CMAKE_DISABLE_PRECOMPILE_HEADERS OFF)
+ 
+     # Keep upstream Aurora split: several sources intentionally use file-local
+@@ -362,6 +384,11 @@
+ # mod's patched code (projects/nsmbw/recomp-newer.yml, Newer is SMNE03) accepts that mod's disc;
+ # src/product/base_product.cpp names the game and the disc it needs from it.
+ set(NSMBW_GAME_ID "SMNE01" CACHE STRING "Disc ID (boot.bin) of the game this build was translated for")
++# Compiled on its own: inside a unity group the body after its own header include is dropped by the
++# translation unit's conditional structure, which leaves GuestFlat::gFlatGuestBase undefined.
++set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
++    PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
++
+ set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp" PROPERTIES
+     COMPILE_DEFINITIONS "NSMBW_GAME_ID=\"${NSMBW_GAME_ID}\"")
+ if(MKW_PLATFORM_MACOS)
+@@ -374,6 +401,12 @@
+         enable_language(ASM)
+         list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
+     endif()
++elseif(MKW_PLATFORM_IOS)
++    # iOS keeps the portable mmap implementation (the Mach VM one is macOS only) and borrows the
++    # same AArch64 context-switch backend as Apple Silicon.
++    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
++    enable_language(ASM)
++    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
+ else()
+     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+     if(MKW_PLATFORM_ANDROID)
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/guest_flat_memory.h	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/include/guest_flat_memory.h	2026-11-18 17:23:10
+@@ -6,6 +6,10 @@
+ // executable/deferred-read pages are uncommitted or protected), while the HOST view is a plain
+ // alias native runtime code (image loading, DVD reads, HLE, GX) writes through unchecked.
+ #include <atomic>
++
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ #include <cstddef>
+ #include <cstdint>
+ #include <vector>
+@@ -43,7 +47,16 @@
+ #error "guest_flat_memory.h has no fixed flat guest base chosen for this architecture"
+ #endif
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++// iOS reserves an app's address space for it and does not promise any particular address is free at
++// build time, so the base is chosen once at launch (guest_flat_memory.cpp) and published here. The
++// translated code only ever calls MemoryInline::FlatRead32(offset), so this costs one extra load per
++// guest access on iOS and nothing on the platforms that keep the constant.
++extern uint8_t* gFlatGuestBase;
++#define MKW_FLAT_GUEST_BASE (GuestFlat::gFlatGuestBase)
++#else
+ #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
++#endif
+ 
+ enum class Backing {
+     Owned,
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/guest_flat_memory.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/src/guest_flat_memory.cpp	2026-11-18 18:20:09
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <climits>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -58,6 +59,22 @@
+         sized = true;
+     }
+     return ashmem;
++#elif defined(__APPLE__)
++    // Darwin has no memfd_create, and iOS denies POSIX shared-memory objects (shm_open returns
++    // EPERM inside the app sandbox). A file in the app's own temporary directory is mapped more
++    // than once and unlinked immediately: anonymous, private to the process, released with the last
++    // mapping - the same contract memfd_create gives on Linux.
++    (void)size;
++    const char* tempDirectory = std::getenv("TMPDIR");
++    char path[PATH_MAX];
++    std::snprintf(path, sizeof(path), "%s/wiicompiled-guest-XXXXXX",
++                  tempDirectory != nullptr && *tempDirectory != '\0' ? tempDirectory : "/tmp");
++    const int fd = mkstemp(path);
++    if (fd >= 0) {
++        unlink(path);
++        fcntl(fd, F_SETFD, FD_CLOEXEC);
++    }
++    return fd;
+ #else
+     (void)size;
+     return memfd_create(name, MFD_CLOEXEC);
+@@ -295,6 +312,22 @@
+             "The flat guest reservation did not land on the fixed base the translated code was "
+             "compiled against.");
+     }
++#elif defined(__APPLE__) && TARGET_OS_IPHONE
++    // No fixed base on iOS: the app's address space is smaller than the desktop one and none of the
++    // desktop addresses are guaranteed free. Take the reservation wherever the kernel puts it and
++    // publish that address; every translated access reads it through MKW_FLAT_GUEST_BASE.
++    const uint64_t size = kGuestSpaceSize + kAllocationGranularity;
++    void* reserved = mmap(nullptr, static_cast<size_t>(size), kProtNone,
++                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (reserved == MAP_FAILED) {
++        std::ostringstream oss;
++        oss << "Unable to reserve the flat guest address space on iOS (" << std::strerror(errno)
++            << "). The app is out of address space before the game has started.";
++        throw std::runtime_error(oss.str());
++    }
++    gFlatGuestBase = static_cast<uint8_t*>(reserved);
++    g_base = gFlatGuestBase;
++    return;
+ #else
+     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
+ 
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/external_audio_macos.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/src/external_audio_macos.cpp	2026-11-18 17:32:04
+@@ -1,7 +1,20 @@
+ #if defined(__APPLE__)
+ 
++#include <TargetConditionals.h>
++
++#if TARGET_OS_IPHONE
++// iOS exposes no Core Audio process-object graph to query who else is playing, so the runtime
++// reports "nothing playing" and the game's music is left alone.
+ #include "external_audio_macos.h"
+ 
++namespace MusicAttenuation {
++MacOSAudioStatus QueryMacOSExternalAudio() noexcept { return {}; }
++} // namespace MusicAttenuation
++
++#else
++
++#include "external_audio_macos.h"
++
+ #include <CoreAudio/CoreAudio.h>
+ #include <unistd.h>
+ #include <vector>
+@@ -85,3 +98,5 @@
+ } // namespace MusicAttenuation
+ 
+ #endif
++
++#endif // !TARGET_OS_IPHONE
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/main.cpp	2026-11-17 18:13:17
++++ /tmp/nsmbw-ios/runtime/src/main.cpp	2026-11-18 18:48:22
+@@ -477,6 +477,9 @@
+         std::lock_guard<std::mutex> lock(state.fileMutex);
+         state.file << "[runtime] WiiCompiled "
+                    << (setupVersion.empty() ? "version unknown" : setupVersion) << "\n";
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++        state.file << "[runtime] ios build: shoulder tilt + motion report\n";
++#endif
+         state.file << "[runtime] process transcript started\n";
+         state.file << "[runtime] pid=" << pid << "\n";
+         state.file << "[runtime] argv=";
+@@ -1764,6 +1767,16 @@
+ extern "C" __attribute__((visibility("default"))) int SDL_main(int argc, char** argv) {
+     return RuntimeMain(argc, argv);
+ }
++#elif defined(__APPLE__) && TARGET_OS_IPHONE
++// iOS has no plain main(): SDL runs UIApplicationMain and calls back into the game. The product
++// defines SDL_MAIN_HANDLED (so SDL does not provide main), which makes wiring this the port's job.
++extern "C" int SDL_RunApp(int argc, char* argv[], int (*mainFunction)(int, char**), void* reserved);
++static int IosRuntimeMain(int argc, char** argv) {
++    return RuntimeMain(argc, argv);
++}
++int main(int argc, char** argv) {
++    return SDL_RunApp(argc, argv, IosRuntimeMain, nullptr);
++}
+ #else
+ int main(int argc, char** argv) {
+     return RuntimeMain(argc, argv);
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/game_folder.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/src/game_folder.cpp	2026-11-18 18:00:11
+@@ -593,6 +593,25 @@
+                 besideProblem.c_str());
+     }
+ #endif
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // The app carries its game inside the bundle (game/ beside the executable). There is no launcher
++    // on iOS to write dvd_root for it, and no file picker to ask with, so use it when it is there.
++    {
++        std::error_code besideError;
++        const fs::path besideDir = RuntimeConfigFile::ExecutableDirectory().value_or(fs::path{});
++        const fs::path beside = besideDir / fs::u8path(RuntimeProduct::Active().programGameFolder);
++        if (!besideDir.empty() && fs::is_directory(beside, besideError)) {
++            const fs::path found = Find(beside);
++            const fs::path root = found.empty() ? beside : found;
++            if (Check(root, nullptr).empty()) {
++                RuntimeConfigFile::UseDvdRootForThisRun(root);
++                RT_LOGF(RT_TAG_RUNTIME, "game folder: %s (inside the app)\n",
++                        RuntimeConfigFile::PathToUtf8(root).c_str());
++                return true;
++            }
++        }
++    }
++#endif
+     const fs::path configured = Find(RuntimeConfigFile::ResolvedDvdRoot());
+     if (!configured.empty() && Problem(configured).empty()) {
+         return true;
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/runtime_config.h	2026-11-17 20:39:11
++++ /tmp/nsmbw-ios/runtime/include/runtime_config.h	2026-11-18 18:07:13
+@@ -1198,7 +1198,12 @@
+ }
+ 
+ inline int32_t ButtonLayout(int32_t fallback = 0) {
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // The iPad build ships with Xbox names (2) unless the player picks another family in F10.
++    return Get().buttonLayout.value_or(2);
++#else
+     return Get().buttonLayout.value_or(fallback);
++#endif
+ }
+ 
+ inline bool SetButtonLayout(int32_t value) {
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/platform/host_platform.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/src/platform/host_platform.cpp	2026-11-18 18:12:12
+@@ -14,6 +14,7 @@
+ 
+ #if defined(__APPLE__)
+ #include <mach-o/dyld.h>
++#include <TargetConditionals.h>
+ #include <pwd.h>
+ #endif
+ 
+@@ -69,7 +70,13 @@
+     }
+ #elif defined(__APPLE__)
+     if (const char* home = std::getenv("HOME"); home && *home) {
++#if TARGET_OS_IPHONE
++        // Documents is the folder the Files app can reach, so logs and saves can be looked at (and
++        // pulled off the device) without a cable.
++        return std::filesystem::path(home) / "Documents" / applicationName;
++#else
+         return std::filesystem::path(home) / "Library" / "Application Support" / applicationName;
++#endif
+     }
+     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
+         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/wii_remote_input.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-ios/runtime/src/wii_remote_input.cpp	2026-11-18 18:48:01
+@@ -286,7 +286,9 @@
+         return;
+     }
+     bool allEnabled = true;
++    bool anySensor = false;
+     for (SDL_SensorType sensor : {SDL_SENSOR_ACCEL, SDL_SENSOR_ACCEL_L}) {
++        anySensor = anySensor || aurora::sdl::GamepadHasSensor(gamepad, sensor);
+         if (aurora::sdl::GamepadHasSensor(gamepad, sensor) && !aurora::sdl::SetGamepadSensorEnabled(gamepad, sensor, true)) {
+             RT_LOG(RT_TAG_CONFIG) << "Wii Remote on port " << (port + 1)
+                                   << ": could not enable an accelerometer: " << SDL_GetError() << std::endl;
+@@ -295,6 +297,10 @@
+     }
+     // Only remember the instance once every sensor is on, so a failed attempt
+     // is retried on the next sample instead of leaving the accelerometer off.
++    RT_LOG(RT_TAG_CONFIG) << "Wii Remote on port " << (port + 1) << ": "
++                          << (anySensor ? "accelerometer found in SDL"
++                                        : "this controller exposes no accelerometer to SDL (no tilt or shake)")
++                          << std::endl;
+     if (allEnabled) {
+         g_sensorsEnabledFor[port] = id;
+     }
+@@ -834,6 +840,20 @@
+     }
+     if (RuntimeConfigFile::WiiAccelTraceEnabled(false)) {
+         TraceSample(chan, sample, rawG, haveRaw, accepted);
++    }
++    // Tilt from the shoulder buttons, for controllers whose motion the host cannot read (the iPad
++    // build sees no DualShock gyro). Holding L1/R1 rolls the remote left/right, which is what the
++    // tilting platforms and the other motion-driven spots read; the rest pose keeps gravity on +Y.
++    // Buttons win while held, so this works even after the gyro path starts delivering.
++    {
++        const bool rollLeft = aurora::sdl::GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
++        const bool rollRight = aurora::sdl::GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
++        if (rollLeft != rollRight) {
++            constexpr float kTiltX = 0.6f;  // about 37 degrees of roll
++            sample.acc[0] = rollLeft ? -kTiltX : kTiltX;
++            sample.acc[2] = 0.0f;
++            sample.acc[1] = -std::sqrt(1.0f - kTiltX * kTiltX);
++        }
+     }
+ 
+     if (kind == Kind::RemoteWithClassic) {
