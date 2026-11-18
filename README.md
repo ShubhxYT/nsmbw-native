@@ -70,8 +70,9 @@ compiles, so a second build takes minutes instead of ~20–30.
   layout: right A, bottom B, top X, left Y). Mappings persist per device.
 - **LAN play is beta.** Rooms are found on your Wi-Fi automatically; Tailscale works for remote
   players and needs no port forwarding. Expect rooms that fail to start or drop — the game says so
-  on the LAN screen. If a remote session hitches and then skips ahead, raise **F10 › LAN › Input
-  delay**; if everything feels late, lower it. Auto sizes it from the room's ping and jitter.
+  on the LAN screen. A session shows `N ms  delay N` at the top of the screen: the round trip and
+  the input delay in force. If a remote session hitches and then skips ahead, raise **F10 › LAN ›
+  Input delay**; if everything feels late, lower it. Auto sizes it from the room's ping and jitter.
 - Saves: `~/Library/Application Support/WiiCompiled/NAND` (macOS),
   `%USERPROFILE%\Documents\MarioWiiSaveData\NAND` (Windows).
 

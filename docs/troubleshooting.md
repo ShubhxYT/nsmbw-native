@@ -82,6 +82,9 @@ frames already sitting there run back to back, which looks like the game skippin
 
 - **F10 › LAN › Input delay** is the knob. `auto` sizes it from the room's ping and jitter at the
   moment the room starts; it is read when a room starts, not live.
+- The top of the screen shows `N ms  delay N` for the whole session: the round trip (a client to the
+  host, the host each client) and the delay in force. Watch those two while tuning rather than the
+  game's feel alone.
 - Raise it if it hitches and skips. Lower it if every button feels late and it never hitches.
 - A two player session needs roughly half the ping; three or four players need roughly the whole
   ping, because the host relays each client's input to the others.
