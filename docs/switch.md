@@ -121,3 +121,41 @@ audio all go through SDL3, and Aurora creates its surface with `SDL_Metal_Create
 So the Switch platform layer replaces SDL rather than configuring it: libnx `nwindow` for the screen,
 `HidNpad` for pads, `audren` for audio, `sdmc:`/romfs for storage, and deko3d owning presentation.
 That is the same split the Shipwright-NX fork landed on.
+
+## The development loop
+
+Working, on a Switch Lite (20.4.0):
+
+```
+build (container)  ->  push (switch/nxlink.py)  ->  app runs  ->  its log comes back
+```
+
+One button press per build, which is the norm for homebrew: hbmenu's netloader accepts a single
+connection per activation (**Y** in hbmenu), and there is no maintained sysmodule that removes that
+step (`sys-nxlink` is a 2018 proof of concept that only survives one session).
+
+`switch/nxlink.py` is a small client for that protocol because the container cannot reach the LAN on
+macOS. It sends the `.nro`, then listens on 28281 for the app's own log stream. Two details that cost
+time to find:
+
+- hbmenu's inflate buffer is `ZLIB_CHUNK` = **16 KB**, so each compressed chunk on the wire must be
+  smaller than that. Larger chunks are refused with "Invalid chunk size".
+- The netloader is **one connection per activation**. Probing the port with `nc` consumes it.
+
+Apps log back by dialling the host themselves (`Say()` in `switch/phase0/source/main.c`): hbmenu does
+not pass the host to the app here, so `nxlinkStdio()` has nothing to connect to.
+
+## What the runtime needs from Horizon
+
+Measured from the runtime sources, before any of it is ported:
+
+| Dependency | Files / sites | Consequence |
+|---|---|---|
+| SDL3 | 17 files | replaced wholesale: `nwindow` for the screen, `HidNpad` for pads, `audren` for audio |
+| `std::filesystem` | 47 files | **the largest port surface**; newlib's libstdc++ support is thin |
+| threads | 36 sites | mapping onto Horizon threads |
+| `mmap` / `mprotect` | 12 sites | the guest arena and its page protection |
+| `<unistd.h>` | 16 files | mostly `usleep`, `getpid`, file calls — newlib covers most |
+| sockets | 3 files | only network play; can be stubbed |
+
+Note what is *not* on that list: the graphics backend is a separate problem, and still the cliff.
