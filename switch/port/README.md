@@ -66,8 +66,30 @@ BSS@SB:      00000000 00000001 00000001 00000000     +0x40 and +0xC0 became 1
 REG: vec=0xe8b70c0 data=0x1 size=5270498306927591953 cap=0
 ```
 
-Something between `__appInit` and `SystemBridge::Initialize` writes `1` to `.bss+0x40` and
-`.bss+0xC0`. The init-array trampoline was ruled out by disabling it.
+RESOLVED — see the TLS aliasing section below. The init-array trampoline was ruled out by disabling it.
 
 Next step: re-enable the trampoline (`install_init_trace()` in `log_channel.cpp`) and have it record
 the word at `__bss_start__ + 0xC0` after every constructor, to name the one that writes it.
+
+## RESOLVED (2026-11-19): `.bss` corruption was TLS aliasing the globals
+
+The word watch named the writer: constructor 77 (`settings_overlay`), value `1`.
+
+```
+16=0x740 ... 49=0x241d80   ← the registry vector growing with real heap pointers
+77=0x1                     ← storage pointer replaced by 1
+```
+
+`switch.ld` places `.tbss` and `.bss` at the **same virtual address** (`0x63b7000`), because `.tbss`
+is NOBITS and TLS addresses are offsets, not real addresses. The first TLS bootstrap pointed
+`tpidr_el0` at `.tdata`, so every `thread_local` living in `.tbss` resolved into `.bss` and wrote over
+a real global. `TranslatedFunctionRegistry`'s vector storage was one of the victims.
+
+Fix: bootstrap against the reserved `.main.tls` region (`__tls_start`..`__tls_end`), which exists for
+exactly this and aliases nothing. `switch_tls.h` seeds it from the `.tdata` image, zeroes the `.tbss`
+tail, then calibrates the base offset against the sentinel as before.
+
+Result: the registry is healthy (`data=0x200241d80 size=396 cap=512`), all **184** DOL constructors
+run, `SystemBridge` and `TranslatedFunctionRegistry::Finalize` complete, and **`aurora_initialize()`
+succeeds**. The next fault is a guest-derived address (`0x1802E7000`, i.e. the arena base plus
+`0x2E7000` for guest `0x802E7000`).

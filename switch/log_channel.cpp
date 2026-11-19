@@ -23,6 +23,11 @@
 extern "C" int g_switchTlsResult;
 extern "C" unsigned long long g_switchTlsDelta;
 
+// Linker-provided .bss bounds (switch.ld). Must be declared at file scope with C linkage: a
+// declaration inside a function or an anonymous namespace gets internal linkage and never resolves.
+extern "C" char __bss_start__[] __attribute__((weak));
+extern "C" char __bss_end__[] __attribute__((weak));
+
 namespace {
 
 // Where the host listener runs. Override at build time with -DNSMBW_LOG_HOST=\"...\".
@@ -156,11 +161,70 @@ void init_trace_index(int value) {
     }
 }
 
+// Writes "<index>=0x<value>\n" with write(2) only: this runs between constructors, where stdio
+// state is not guaranteed.
+void init_trace_pair(int index, unsigned value) {
+    char buffer[48];
+    int out = 0;
+    if (index == 0) {
+        buffer[out++] = '0';
+    } else {
+        char digits[12];
+        int count = 0;
+        int remaining = index < 0 ? -index : index;
+        while (remaining > 0 && count < 12) {
+            digits[count++] = static_cast<char>('0' + remaining % 10);
+            remaining /= 10;
+        }
+        if (index < 0) {
+            digits[count++] = '-';
+        }
+        while (count > 0) {
+            buffer[out++] = digits[--count];
+        }
+    }
+    buffer[out++] = '=';
+    buffer[out++] = '0';
+    buffer[out++] = 'x';
+    bool started = false;
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        const int digit = static_cast<int>((value >> shift) & 0xF);
+        if (digit != 0 || started || shift == 0) {
+            started = true;
+            buffer[out++] = static_cast<char>(digit < 10 ? '0' + digit : 'a' + digit - 10);
+        }
+    }
+    buffer[out++] = '\n';
+    const int fd = ::open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        (void)!::write(fd, buffer, static_cast<size_t>(out));
+        ::close(fd);
+    }
+}
+
+// The word at __bss_start__+0xC0 is TranslatedFunctionRegistry's vector storage. .bss is provably
+// zero at __appInit, so whichever constructor changes this word is the one writing 1 into it.
+unsigned g_lastBssWord = 0;
+
+unsigned observe_bss_word() {
+    if (__bss_start__ == nullptr) {
+        return 0;
+    }
+    const volatile unsigned* word =
+        reinterpret_cast<const volatile unsigned*>(__bss_start__ + 0xC0);
+    return *word;
+}
+
 void init_trampoline() {
     const int index = g_initNext++;
     init_trace_index(index);
     if (index >= 0 && index < g_initCount) {
         g_initTarget[index]();
+    }
+    const unsigned value = observe_bss_word();
+    if (value != g_lastBssWord) {
+        init_trace_pair(index, value);
+        g_lastBssWord = value;
     }
 }
 
@@ -212,8 +276,7 @@ static void switch_log_earliest() {
                  connected ? "socket" : "file", g_switchTlsResult,
                  static_cast<unsigned long long>(g_switchTlsDelta));
     std::fflush(stderr);
-    // install_init_trace();  // disabled: the per-constructor trace has served its purpose
-    //                        // and is a suspect in the .bss corruption seen in SystemBridge.
+    install_init_trace();
 }
 
 __attribute__((constructor(101))) static void switch_log_earliest_ctor() { switch_log_earliest(); }
