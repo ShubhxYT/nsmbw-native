@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
 
         int slot = dkQueueAcquireImage(g_renderQueue, g_swapchain);
         dkQueueSubmitCommands(g_renderQueue, g_cmdsBindFramebuffer[slot]);
-        dkQueueSubmitCommands(g_renderQueue, g_cmdsClear[frame % CLEAR_COUNT]);
+        dkQueueSubmitCommands(g_renderQueue, g_cmdsClear[(frame / 60) % CLEAR_COUNT]);  // one colour a second, not a strobe
         dkQueuePresentImage(g_renderQueue, g_swapchain, slot);
 
         if (++frame % 60 == 0) {
