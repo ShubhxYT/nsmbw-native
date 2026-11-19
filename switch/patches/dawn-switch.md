@@ -282,3 +282,24 @@ The renderer now initialises and reaches swapchain setup:
 
 `eglCreateWindowSurface` needs the NWindow as its native window; the same class of problem as the
 `dlopen` fix, one layer further out.
+
+## Surface creation fails with EGL_BAD_NATIVE_WINDOW
+
+Instrumenting the `__SWITCH__` case in `SwapChainEGL.cpp` (log the handle, `nwindowGetDefault()`, and
+`eglGetError()`) gives the exact failure:
+
+```
+EGL: create window surface
+EGL: surface=0x0  window=0xf4169c8  default=0xf4169c8  err=0x300b
+```
+
+`0x300b` is **`EGL_BAD_NATIVE_WINDOW`**. The handle is the right one - it equals
+`nwindowGetDefault()` - so Aurora's descriptor plumbing is correct and Mesa's Switch EGL is rejecting
+it inside `eglCreateWindowSurface`.
+
+Note the TU needs `extern "C" void* nwindowGetDefault(void);` declared locally: Dawn's include path
+carries neither libnx headers nor `switch.h`.
+
+Next: read what devkitPro's `egl_switch.c` (inside `libEGL.a`) actually accepts as a native window -
+it may require `eglCreatePlatformWindowSurfaceEXT`, a configured NWindow, or a different struct than
+`NWindow*`.
