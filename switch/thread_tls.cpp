@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 #include "switch_tls.h"
 
@@ -61,3 +62,54 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
     return result;
 }
 
+
+namespace {
+
+void LogPthreadFailure(const char* name, int result) {
+    char line[96];
+    std::snprintf(line, sizeof line, "PTHREAD %s rc=%d", name, result);
+    switch_trace_mark(line);
+}
+
+} // namespace
+
+// libstdc++ turns a non-zero return from any of these into std::system_error. The retrace scheduler
+// throws ENOSYS from inside std::call_once, and these are the remaining sources.
+extern "C" int __real_pthread_mutex_lock(pthread_mutex_t* mutex);
+extern "C" int __real_pthread_mutex_trylock(pthread_mutex_t* mutex);
+extern "C" int __real_pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex);
+extern "C" int __real_pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
+                                             const struct timespec* abstime);
+
+extern "C" int __wrap_pthread_mutex_lock(pthread_mutex_t* mutex) {
+    const int result = __real_pthread_mutex_lock(mutex);
+    if (result != 0) {
+        LogPthreadFailure("pthread_mutex_lock", result);
+    }
+    return result;
+}
+
+extern "C" int __wrap_pthread_mutex_trylock(pthread_mutex_t* mutex) {
+    const int result = __real_pthread_mutex_trylock(mutex);
+    if (result != 0 && result != 16 /* EBUSY is expected */) {
+        LogPthreadFailure("pthread_mutex_trylock", result);
+    }
+    return result;
+}
+
+extern "C" int __wrap_pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    const int result = __real_pthread_cond_wait(cond, mutex);
+    if (result != 0) {
+        LogPthreadFailure("pthread_cond_wait", result);
+    }
+    return result;
+}
+
+extern "C" int __wrap_pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex,
+                                             const struct timespec* abstime) {
+    const int result = __real_pthread_cond_timedwait(cond, mutex, abstime);
+    if (result != 0 && result != 110 /* ETIMEDOUT is expected */) {
+        LogPthreadFailure("pthread_cond_timedwait", result);
+    }
+    return result;
+}

@@ -223,3 +223,25 @@ Established, each with a measurement rather than an inference:
 generated block that wrapped `pthread_mutex_lock`/`pthread_cond_wait`/`pthread_cond_timedwait` was
 reverted because the macro failed to emit the definitions and broke the link; redo those as explicit
 functions, then rebuild with the matching `--wrap=` flags.
+
+## All pthread primitives cleared
+
+`switch/thread_tls.cpp` now wraps `pthread_create`, `pthread_mutex_lock`,
+`pthread_mutex_trylock`, `pthread_cond_wait` and `pthread_cond_timedwait` as explicit functions, each
+logging a non-zero return (EBUSY/ETIMEDOUT expected and filtered). Result over a full run:
+
+```
+8526 PTHREAD_ONCE        (all rc=0)
+0    PTHREAD_CREATE failed
+0    mutex/condvar failures
+0    any rc!=0
+```
+
+So the `std::system_error(88)` does **not** originate in any pthread primitive. Remaining
+possibilities: a `filesystem_error` (it derives from `system_error`), or libstdc++ throwing
+`system_error(errno)` with a **stale errno of 88** left by one of our shims that returns -1 without
+setting errno (`pipe`, `waitpid`, ...).
+
+Next: symbolize frame 2 of the `SETRACE` capture - recompute the image base from the running binary
+first, since one frame landed outside the assumed text range - to name the immediate caller of
+`__throw_system_error`.
