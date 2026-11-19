@@ -1723,12 +1723,18 @@ int RuntimeMain(int argc, char** argv) {
         RT_LOG(RT_TAG_RUNTIME) << "graphics adapter: " << GraphicsInfo::Name() << ", compatibility fixes "
                   << (auroraInfo.gpuCompatActive ? "on" : "off") << std::endl;
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
+        switch_trace_mark("RM: frame worker callback");
         GxGuestWrite::InstallAuroraHooks();
+        switch_trace_mark("RM: gx hooks");
         AxfxReverbNative::Install();
+        switch_trace_mark("RM: reverb");
         DisplaySettings::OnFrameBoundary(auroraInfo.windowSize.native_fb_width,
                                          auroraInfo.windowSize.native_fb_height);
+        switch_trace_mark("RM: frame boundary");
         settings_overlay::InitializeRuntimeSettings();
+        switch_trace_mark("RM: runtime settings");
         Updater::Start();  // the file select's Update button: checks GitHub in the background
+        switch_trace_mark("RM: updater");
         static constexpr const char* kAspectNames[] = {"original 4:3", "16:9", "fill", "16:10"};
         RT_LOG(RT_TAG_CONFIG) << "display aspect=" << kAspectNames[displaySettings.aspect]
                   << " SCGetAspectRatio=" << (configWidescreen ? 1 : 0)
@@ -1738,15 +1744,19 @@ int RuntimeMain(int argc, char** argv) {
                   << " native=" << auroraInfo.windowSize.native_fb_width << "x"
                   << auroraInfo.windowSize.native_fb_height << std::endl;
         g_auroraInitialized.store(true, std::memory_order_release);
+        switch_trace_mark("RM: aurora flag");
         settings_overlay::RunShaderLoadingScreen();
+        switch_trace_mark("RM: loading screen");
 
         auto entry = ResolveEntry();
+        switch_trace_mark("RM: entry resolved");
         InitializePersistentCpuContext();
         auto& cpu = GetPersistentCpuContext();
         SeedCpuContext(cpu);
         
         // Initialize the fiber-based threading system
         Fiber::GuestFiberManager::Initialize();
+        switch_trace_mark("RM: fibers");
 
         // Deterministic mode: the controllers as boot sees them, until the first retrace latches.
         if (DetClock::Enabled()) {

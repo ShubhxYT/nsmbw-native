@@ -93,3 +93,32 @@ Result: the registry is healthy (`data=0x200241d80 size=396 cap=512`), all **184
 run, `SystemBridge` and `TranslatedFunctionRegistry::Finalize` complete, and **`aurora_initialize()`
 succeeds**. The next fault is a guest-derived address (`0x1802E7000`, i.e. the arena base plus
 `0x2E7000` for guest `0x802E7000`).
+
+## Current state after the TLS fix
+
+The process no longer crashes. `init.log` ends with:
+
+```
+RM: aurora initialized
+REG: frozen lookup 00000000
+REG: frozen find done
+```
+
+and Ryujinx stays on its "Loading" splash with the guest alive. A sample of the live process shows
+every thread parked in `__psynch_cvwait` — the guest is **blocked on a condition variable**, not
+spinning.
+
+Two things pinned before that point:
+
+* Guest address 0 was being dereferenced (`GF: OUT OF ARENA guest=00000000 host=0x1802e7000`, where
+  `g_base == 0x1802e7000` exactly) and a null callback was dispatched (`REG: frozen lookup 00000000`).
+  A 64 KiB zero page now backs any guest access below `0x80000000`, because Horizon cannot reserve
+  the 2 GiB the arena is offset by. That removed the fault without hiding it: every hit is logged as
+  `GF: NULLPAGE guest=...`.
+* `RM: frame worker callback` — the statement immediately after `aurora_set_frame_worker_wait_callback`
+  — is never reached, so the main thread blocks there or in the statements just before it.
+
+Next: decide whether `aurora_set_frame_worker_wait_callback` is deadlocking against the frame worker
+that `aurora_initialize` starts (the worker resolves a null callback before the main thread installs
+the real one), or whether the worker is waiting for a frame the main thread never submits. If it is
+the former, install the callback before `aurora_initialize` or gate the worker on a flag it can see.

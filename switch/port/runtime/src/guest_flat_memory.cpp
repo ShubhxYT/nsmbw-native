@@ -341,6 +341,13 @@ void EnsureReservation() {
     std::memset(block, 0, kSwitchArena);
     switch_trace_mark("GF: arena zeroed");
     g_base = static_cast<uint8_t*>(block) - kLowestGuest;
+    {
+        char line[160];
+        std::snprintf(line, sizeof line, "GF: block=%p end=%p g_base=%p",
+                      block, static_cast<void*>(static_cast<uint8_t*>(block) + kSwitchArena),
+                      static_cast<void*>(g_base));
+        switch_trace_mark(line);
+    }
     return;
 #else
     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
@@ -720,6 +727,25 @@ void Initialize(const std::vector<RegionRequest>& regions) {
 
 uint8_t* HostPointer(uint32_t guestAddress) {
     if (!g_initialized) return nullptr;
+#if defined(__SWITCH__)
+    // The arena covers guest 0x80000000..0x9FFFFFFF only; g_base sits 2 GiB before it, so an access
+    // below 0x80000000 computes a pointer that is not mapped and faults instead of being reported.
+    // Horizon cannot reserve 2 GiB of guard space for that range, so such accesses land in a small
+    // zero page instead: reads return 0 (as they would from unmapped Wii low memory) and writes are
+    // discarded rather than killing the process. Every hit is logged, so a real out-of-range access
+    // is still visible.
+    if (guestAddress < 0x80000000u) {
+        static int reported = 0;
+        if (reported < 8) {
+            ++reported;
+            char line[80];
+            std::snprintf(line, sizeof line, "GF: NULLPAGE guest=%08x", guestAddress);
+            switch_trace_mark(line);
+        }
+        static uint8_t nullPage[0x10000];
+        return nullPage + (guestAddress & 0xFFFFu);
+    }
+#endif
     for (const auto& region : MappedRegions()) {
         if (guestAddress < region.guestBase) continue;
         const uint64_t offset = static_cast<uint64_t>(guestAddress) - region.guestBase;

@@ -373,11 +373,21 @@ const TranslatedFunctionInfo* TranslatedFunctionRegistry::FindByAddressPtrSlow(u
     switch_trace_mark("REG: slow enter");
     if (RegistryFrozen().load(std::memory_order_acquire)) {
         switch_trace_mark("REG: frozen path");
+        {
+            char line[64];
+            std::snprintf(line, sizeof line, "REG: frozen lookup %08x", address);
+            switch_trace_mark(line);
+        }
         const auto it = AddressIndex().find(address);
         switch_trace_mark("REG: frozen find done");
         return it != AddressIndex().end() ? &Registry()[it->second] : nullptr;
     }
 
+    {
+        char line[64];
+        std::snprintf(line, sizeof line, "REG: lookup %08x", address);
+        switch_trace_mark(line);
+    }
     switch_trace_mark("REG: locking");
     std::lock_guard<std::mutex> lock(RegistryMutex());
     switch_trace_mark("REG: locked");
