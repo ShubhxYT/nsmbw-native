@@ -244,3 +244,22 @@ The POSIX mapping calls the file still contains are compiled out on Switch throu
 are unreachable in checked mode.
 
 That leaves the runtime with **one** wall: SDL.
+
+## The platform shell runs at 720p
+
+`switch/platform` is the presentation loop the runtime will sit in: it creates a **1280x720** deko3d
+swapchain (two framebuffers), records per-framebuffer bind lists and a set of clear command lists, and
+presents every frame with pad input and a log channel.
+
+Measured on the console:
+
+```
+swapchain:     1280x720, 2 framebuffers
+operation:     handheld
+deko3d:        device, swapchain and colours ready
+frame 60 ... frame 720
+```
+
+720 frames is ~12 seconds at 60 Hz, so the loop paces correctly. Two linker details worth keeping:
+the Makefile needs `-ldeko3d` **before** `-lnx` (static libraries resolve left to right, and deko3d
+calls libnx's `nv*` services), and `nwindowSetDimensions` is what pins the swapchain to 720p.
