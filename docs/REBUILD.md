@@ -9,6 +9,22 @@ own code — but has never presented a frame.** One defect remains between here 
 
 ---
 
+## 0. Never commit — hard rule
+
+Two things must never enter this repository, in any branch, commit or tag:
+
+* **The extracted game data.** The disc's `sys/` and `files/` trees, `main.dol`, the FST, and any
+  archive extracted from them.
+* **Any console keys.** `prod.keys`, `title.keys`, the trimmed keyset used for packaging, tickets, or
+  anything derived from them.
+
+This document refers to both by **path and description only**, deliberately, so the guide stays usable
+on a clean machine where the person rebuilding supplies their own legally obtained copy. If either has
+ever been staged, deleting it in a later commit is not enough — it has to be purged from history,
+because a repository is the wrong place for it and history keeps it forever.
+
+---
+
 ## 1. Goal and definition of done
 
 Run *New Super Mario Bros. Wii* natively on a jailbroken Switch Lite, not via an emulator inside the
@@ -337,14 +353,19 @@ bugs in §4 were found this way rather than through the 64 MB game package.
 
 ---
 
-## 11. Open questions
+## 11. Decisions taken, and open questions
+
+**Decided (2026-11-19):**
+
+* **Work is paused.** Nobody resumes this automatically; it is handed off via this document.
+* **Ryujinx is the only validation environment for now.** The surface fix does not need console
+  validation before continuing.
+* **Game data and console keys never enter the repository** — see §0.
+
+**Open:**
 
 1. **Where should this live long-term?** Keep the platform layer in this repo, or fold it into the
    runtime's own tree as a first-class target?
-2. **Is a first frame the acceptance bar**, or full playability (level select, controls, audio)?
-3. **If the surface fix does not work**, how much more iteration is acceptable — should I keep chasing
-   it autonomously, or pause and report at each milestone?
-4. **Hardware vs emulator:** should the surface fix be validated on the console before continuing, given
-   installs need you?
-5. **The extracted disc and keys are not in the repo** and never should be — confirm the intended
-   handling for anyone rebuilding this so the instructions stay usable without shipping game data.
+2. **Is a first frame the acceptance bar**, or full playability (level select, controls, audio)? This
+   was not answered and is still unknown.
+3. **If work resumes:** fix one blocker and report each time, or chain several before reporting?
