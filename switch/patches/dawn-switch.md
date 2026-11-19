@@ -109,3 +109,26 @@ No translated function registered at address 0x80004050
 Diagnostic marks were added to `PhysicalDeviceGL.cpp`, `ContextEGL.cpp`, `DeviceGL.cpp` and
 `QueueGL.cpp` (all `switch_trace_mark` calls); they are cheap to leave in and were what located the
 stall.
+
+## Diagnostics: catching host exceptions that escape into guest code
+
+`switch/cxa_throw_probe.cpp` is linked with `-Wl,--wrap=__cxa_throw` and
+`-Wl,--wrap=_ZSt9terminatev`, so it logs every C++ throw (type, `what()`, and the last translated
+dispatch address) and every `std::terminate` without disturbing libstdc++:
+
+```
+THROW St12system_error from guest=801b5b00 what=Function not implemented
+TERMINATE from guest=801b5b00
+```
+
+Two lessons from it:
+
+* The `toml::value::at` `out_of_range` throws (`discord`, `retro_rewind_root`, `overlay_roots`) are
+  expected and caught — they are not the fault.
+* **`RecompMod::CurrentTranslatedExecutionAddress()` is the last *dispatched* target, not the throw
+  site.** It stays pinned to the most recent `Invoke*Cpu`, so it does not identify where a host
+  exception originated. Do not treat it as a fault address.
+
+The real fault is `std::system_error` with `ENOSYS` ("Function not implemented") escaping into guest
+code, which has no handler, so it becomes `std::terminate`. Adding a `catch(std::exception)` around
+`OSSuspendThread`'s body did not change it, which confirms the throw happens elsewhere.
