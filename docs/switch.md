@@ -203,3 +203,25 @@ So the port's shape is now concrete rather than guessed:
    alias region and a 512 MB allocation that commits).
 2. **Platform layer**: replace SDL for window, pad, audio and timing with libnx.
 3. **Everything else** — the timing, memory and game logic — is already compiling.
+
+## Threads and std::filesystem work — measured
+
+Probe on the console:
+
+```
+threads:       4 x 100000 increments -> 400000 (29 ms)
+chrono sleep:  50 ms requested, 50 ms measured
+fs mkdir:      ok
+fs write:      ok
+fs size:       28 bytes
+fs iterate:    50 entries in sdmc:/switch
+```
+
+That removes two entries from the earlier "biggest port surface" list: devkitA64's libstdc++ provides
+**working `std::thread`** (pthread-backed) and a **working `std::filesystem`** on `sdmc:`. The 36
+thread sites and 47 filesystem files do not need replacing.
+
+Which leaves exactly two walls for the whole port:
+
+1. **SDL3** — no Switch backend; replaced by a libnx platform layer (window, pad, audio).
+2. **Guest memory** — Horizon has no `mmap`; the flat arena must be mapped into the alias region.
