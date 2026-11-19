@@ -1,0 +1,136 @@
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/isa/ppc_isa_int.h	2026-11-17 17:26:00
++++ /tmp/nsmbw-switch/runtime/include/isa/ppc_isa_int.h	2026-11-19 07:25:49
+@@ -11,7 +11,13 @@
+ 
+ inline uint32_t PpcRotl32Inline(uint32_t value, uint32_t shift)
+ {
++#if defined(__clang__)
+     return __builtin_rotateleft32(value, shift);
++#else
++    // PPC rotate-left: the shift is taken modulo 32, and a rotate by 0 must not shift by 32.
++    const uint32_t amount = shift & 31u;
++    return amount == 0 ? value : (value << amount) | (value >> (32u - amount));
++#endif
+ }
+ 
+ extern "C" uint32_t OSSystemCall();
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/isa/ppc_isa_config.h	2026-11-17 17:26:00
++++ /tmp/nsmbw-switch/runtime/include/isa/ppc_isa_config.h	2026-11-19 07:25:49
+@@ -35,4 +35,9 @@
+ #define MKW_PPC_COLD __attribute__((cold))
+ 
+ 
++#if defined(__clang__)
+ using MkwStateFreeResult2 = uint64_t __attribute__((ext_vector_type(2)));
++#else
++// Same layout: two 64-bit lanes, 16 bytes.
++using MkwStateFreeResult2 = uint64_t __attribute__((vector_size(16)));
++#endif
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/runtime_config.h	2026-11-17 20:39:11
++++ /tmp/nsmbw-switch/runtime/include/runtime_config.h	2026-11-19 07:26:29
+@@ -218,6 +218,8 @@
+     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
+ #elif defined(_WIN32)
+     static constexpr std::array<std::string_view, 4> values{"auto", "d3d12", "vulkan", "d3d11"};
++#elif defined(__SWITCH__)
++    static constexpr std::array<std::string_view, 2> values{"auto", "deko3d"};
+ #endif
+     return std::find(values.begin(), values.end(), value) != values.end();
+ }
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/src/guest_flat_memory.cpp	2026-11-17 17:26:00
++++ /tmp/nsmbw-switch/runtime/src/guest_flat_memory.cpp	2026-11-19 07:12:30
+@@ -31,7 +31,26 @@
+ #include <cerrno>
+ #include <cstring>
+ #include <fcntl.h>
++#if defined(__SWITCH__)
++// Horizon has no <sys/mman.h>. The arena is a plain heap block and every access is bounds-checked,
++// so the POSIX mapping calls below are never reached; these shims exist to compile the code paths
++// that stay shared with the other platforms.
++#include <cstdlib>
++#define PROT_NONE 0
++#define PROT_READ 1
++#define PROT_WRITE 2
++#define MAP_PRIVATE 0
++#define MAP_ANONYMOUS 0
++#define MAP_NORESERVE 0
++#define MAP_SHARED 0
++#define MAP_FIXED 0
++#define MAP_FAILED (reinterpret_cast<void*>(-1))
++static inline void* mmap(void*, size_t, int, int, int, off_t) { return MAP_FAILED; }
++static inline int munmap(void*, size_t) { return 0; }
++static inline int mprotect(void*, size_t, int) { return 0; }
++#else
+ #include <sys/mman.h>
++#endif
+ #include <unistd.h>
+ #if defined(__ANDROID__)
+ #include <android/sharedmem.h>
+@@ -58,6 +77,10 @@
+         sized = true;
+     }
+     return ashmem;
++#elif defined(__SWITCH__)
++    (void)name;
++    (void)size;
++    return -1;  // no shared-memory objects on Horizon; the checked arena path does not need them
+ #else
+     (void)size;
+     return memfd_create(name, MFD_CLOEXEC);
+@@ -70,8 +93,14 @@
+ #if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+ // A host page larger than a Wii page can't carry per-Wii-page protection (see the header).
+ extern const bool g_requiresCheckedAccess = [] {
++#if defined(__SWITCH__)
++    // Horizon has no user-installable fault handler, so guest access is bounds-checked instead of
++    // relying on page protections to trap.
++    return true;
++#else
+     const long size = sysconf(_SC_PAGESIZE);
+     return size > 0 && static_cast<size_t>(size) > kGuestPageSize;
++#endif
+ }();
+ #endif
+ namespace {
+@@ -295,6 +324,19 @@
+             "The flat guest reservation did not land on the fixed base the translated code was "
+             "compiled against.");
+     }
++#elif defined(__SWITCH__)
++    // Horizon has no mmap and no reservation API. One contiguous block is taken and presented as the
++    // flat base for the range the game addresses: MEM1 at 0x80000000, MEM2 at 0x90000000. MMIO is
++    // diverted by the checked accessors, so the 0xCC000000 register window needs no storage.
++    constexpr uintptr_t kLowestGuest = 0x80000000u;
++    constexpr size_t kSwitchArena = 0x20000000u;  // 512 MB
++    void* block = std::aligned_alloc(0x1000, kSwitchArena);
++    if (block == nullptr) {
++        throw std::runtime_error("Unable to allocate the flat guest arena on Horizon (512 MB).");
++    }
++    std::memset(block, 0, kSwitchArena);
++    g_base = static_cast<uint8_t*>(block) - kLowestGuest;
++    return;
+ #else
+     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
+ 
+@@ -331,7 +373,9 @@
+     }
+ #endif
+ 
++#if !defined(__SWITCH__)
+     g_base = static_cast<uint8_t*>(reserved);
++#endif
+ }
+ 
+ #if defined(_WIN32)
+--- /Users/shubhmac/wii-port/nsmb-wither/runtime/include/system_bridge.h	2026-11-17 17:26:00
++++ /tmp/nsmbw-switch/runtime/include/system_bridge.h	2026-11-19 06:58:13
+@@ -19,6 +19,9 @@
+ #if defined(_WIN32)
+ using MkwJmpBuf = jmp_buf;
+ #define MKW_SETJMP(buf) setjmp(buf)
++#elif defined(__SWITCH__)
++using MkwJmpBuf = jmp_buf;
++#define MKW_SETJMP(buf) setjmp(buf)
+ #else
+ using MkwJmpBuf = sigjmp_buf;
+ #define MKW_SETJMP(buf) sigsetjmp(buf, 1)
