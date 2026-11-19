@@ -166,6 +166,29 @@ Horizon has no `pipe(2)`.
   under **Ryujinx** on the Mac (`~/Documents/Ryujinx/Ryujinx/Ryujinx.app`, keys and firmware already
   installed, `~/Library/Application Support/Ryujinx/games`) to get a stack trace without the console.
 
+## 7b. Local testing with Ryujinx (no console needed)
+
+The Mac already has Ryujinx with the console's own keys and firmware:
+
+```
+app      ~/Documents/Ryujinx/Ryujinx/Ryujinx.app
+run      ~/Documents/Ryujinx/Ryujinx/Ryujinx.app/Contents/MacOS/Ryujinx <file.nsp>
+keys     ~/Library/Application Support/Ryujinx/system/{prod.keys,title.keys}
+data     ~/Library/Application Support/Ryujinx/
+```
+
+Two things matter when running a homebrew NSP there:
+
+1. **The emulated SD card is a real directory**: `~/Library/Application Support/Ryujinx/sdcard/`.
+   `sdmc:/switch/nsmbw/...` maps to `…/Ryujinx/sdcard/switch/nsmbw/…`. It must be created by hand:
+   `Config.toml` plus `sys/` and `files/` from the extracted disc. Without the directory, the app's
+   `fopen("sdmc:/switch/nsmbw/boot.log")` fails and you get no logs at all.
+2. Guest stdio is logged with a `|G|` prefix in Ryujinx's output (guest logging is enabled in
+   `Config.json`), so `nsmbw: reached C++ runtime` should appear there. Ryujinx also keeps the window
+   open after a guest crash, so "the window is up" is not proof the app is alive.
+
+This is the fastest iteration loop: no install, no netloader, no button presses, full stack traces.
+
 ## 8. Known remaining work (after the boot fix)
 
 1. Reach `RuntimeMain`: config load, `GameFolder`, guest arena.
