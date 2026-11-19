@@ -1697,6 +1697,14 @@ int RuntimeMain(int argc, char** argv) {
         switch_trace_mark("RM: aurora config built");
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
         switch_trace_mark("RM: aurora initialized");
+        {
+            char line[256];
+            std::snprintf(line, sizeof line, "RM: aurora status=%d error=%s",
+                          static_cast<int>(auroraInfo.initializationStatus),
+                          auroraInfo.initializationError != nullptr ? auroraInfo.initializationError
+                                                                    : "(none)");
+            switch_trace_mark(line);
+        }
         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
             throw std::runtime_error(auroraInfo.initializationError != nullptr
                 ? auroraInfo.initializationError : "No supported graphics backend is available");
