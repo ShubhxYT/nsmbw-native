@@ -162,3 +162,19 @@ scheduling path reached from it.
 Next: determine what libnx's `pthread_once` returns here (log its result before libstdc++ maps it to
 `system_error`), and whether a stale `errno` of `ENOSYS` (our `pipe()` shim returns -1 without setting
 errno) is being turned into the exception.
+
+## Ruled out: pthread_once and thread TLS
+
+Two hypotheses tested and disproved for the `std::call_once` -> `system_error(ENOSYS)` fault:
+
+* **`pthread_once` failing.** Wrapped with `--wrap=pthread_once` and logged every call:
+  **8,525 calls, all `rc=0 errno=0`**, including the ones immediately before the throw. So
+  `__gthread_once` is not returning an error, and libstdc++ is calling `__throw_system_error` with a
+  value that did not come from it.
+* **Secondary threads without TLS.** `SwitchTlsBootstrap()` only ever ran for the main thread, so
+  `switch/thread_tls.cpp` now wraps `pthread_create` and gives each new thread a private TLS block
+  (`SwitchTlsAttach()`). It is a genuine defect - libnx never writes `tpidr_el0`, so every worker
+  thread's thread_locals resolved against address 0 - but fixing it did **not** change this crash.
+
+Next: wrap `std::__throw_system_error` itself and log its argument. That reports the exact errno
+libstdc++ decided to throw with, which is the one fact still missing.

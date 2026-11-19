@@ -9,6 +9,8 @@
 #include <string>
 #include <typeinfo>
 #include <unwind.h>
+#include <cerrno>
+#include <pthread.h>
 
 #include "recomp_mod_loader.h"
 
@@ -77,4 +79,17 @@ extern "C" void __wrap__ZSt9terminatev() {
                   static_cast<unsigned>(RecompMod::CurrentTranslatedExecutionAddress()));
     switch_trace_mark(line);
     __real__ZSt9terminatev();
+}
+
+// std::call_once turns __gthread_once into std::system_error(errno). Log what pthread_once actually
+// returns, and the errno left behind, so a stale errno can be told apart from a real failure.
+extern "C" int __real_pthread_once(pthread_once_t* once, void (*init)(void));
+
+extern "C" int __wrap_pthread_once(pthread_once_t* once, void (*init)(void)) {
+    errno = 0;
+    const int result = __real_pthread_once(once, init);
+    char line[128];
+    std::snprintf(line, sizeof line, "PTHREAD_ONCE rc=%d errno=%d", result, errno);
+    switch_trace_mark(line);
+    return result;
 }

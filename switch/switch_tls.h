@@ -17,6 +17,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace SwitchTls {
 
@@ -101,4 +103,33 @@ extern "C" inline int SwitchTlsBootstrap() {
     Set(0);
     g_switchTlsResult = static_cast<int>(TlsResult::NoDeltaFound);
     return g_switchTlsResult;
+}
+
+// Gives the calling thread a private TLS block. Threads created after startup do not inherit the main
+// thread's block, and libnx never writes tpidr_el0, so without this every thread_local in a worker
+// thread resolves against address 0. libstdc++'s std::call_once keeps its state in thread_locals,
+// which is how that broke the retrace scheduler.
+extern "C" inline bool SwitchTlsAttach() {
+    using namespace SwitchTls;
+    if (__tls_start == nullptr || __tls_end == nullptr || __tdata_lma == nullptr) {
+        return false;
+    }
+    const size_t total = static_cast<size_t>(__tls_end - __tls_start);
+    size_t image = 0;
+    if (__tdata_lma_end != nullptr && __tdata_lma_end > __tdata_lma) {
+        image = static_cast<size_t>(__tdata_lma_end - __tdata_lma);
+    }
+    if (image > total) {
+        image = total;
+    }
+    // Leaked deliberately: a thread's TLS must outlive the thread's own frames.
+    auto* block = static_cast<char*>(std::malloc(total + 16));
+    if (block == nullptr) {
+        return false;
+    }
+    std::memcpy(block, __tdata_lma, image);
+    std::memset(block + image, 0, total - image);
+    // Same base delta the main thread calibrated, which is a link-time property, not per-thread.
+    Set(reinterpret_cast<uint64_t>(block) - g_switchTlsDelta);
+    return true;
 }
