@@ -206,3 +206,20 @@ the 8,525 logged calls were all rc=0: the failing one never got that far.
 So the ENOSYS comes from another pthread primitive used inside the retrace scheduler. libstdc++ turns a
 non-zero `pthread_mutex_lock`/`pthread_cond_wait` result into exactly this exception, so those are the
 next things to wrap and log.
+
+## Where the ENOSYS hunt stands
+
+Established, each with a measurement rather than an inference:
+
+| Hypothesis | Result |
+|---|---|
+| `std::__throw_system_error` argument | **88** = newlib `ENOSYS` |
+| `pthread_once` returning an error | 8,525 calls, all `rc=0` - the failing call throws *inside* it and never returns |
+| `pthread_create` failing in the retrace path | wrapper logs failures; none appeared |
+| Guarding `OSSuspendThread` | no effect - throw is deeper |
+| Secondary threads lacking TLS | real bug, fixed in `thread_tls.cpp`, but not this crash |
+
+`switch/thread_tls.cpp` ends at the `pthread_create` wrapper (TLS attach + failure logging). A
+generated block that wrapped `pthread_mutex_lock`/`pthread_cond_wait`/`pthread_cond_timedwait` was
+reverted because the macro failed to emit the definitions and broke the link; redo those as explicit
+functions, then rebuild with the matching `--wrap=` flags.
