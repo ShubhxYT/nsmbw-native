@@ -122,3 +122,30 @@ Next: decide whether `aurora_set_frame_worker_wait_callback` is deadlocking agai
 that `aurora_initialize` starts (the worker resolves a null callback before the main thread installs
 the real one), or whether the worker is waiting for a frame the main thread never submits. If it is
 the former, install the callback before `aurora_initialize` or gate the worker on a flag it can see.
+
+## Registration shards must be compiled
+
+`build-pie.sh` only globs `generated/build_shards/base_common/`, so the translator's 16 bulk
+registration shards in `generated/build_shards/base_registration/` were never compiled. The registry
+therefore held 396 entries instead of the full function map, and `ResolveEntry()` failed with:
+
+```
+No translated function registered at address 0x80004050
+```
+
+`0x80004050` *is* in `registration_08_f085cbf1d5c0252e.cpp` (`{0x80004050u, "func_80004050", ...}`).
+`switch/build-registration.sh` compiles all 16 into `obj-pie/gen/` (which every link globs), adding
+about 79,000 relocations — all of them in the writable segment, so still fine.
+
+With that, the entry resolves and translated guest code runs for the first time:
+
+```
+SB: dol ctor 0 @802ED9E0
+SB: read 802DD2E0
+SB: translated found
+SB: invoke 802DD2E0      ← first translated Wii function invoked
+REG: lookup 802dd2e0     ← and it calls back into the registry
+```
+
+Startup now stops inside the game's first DOL constructor, with no crash artifact and no fault
+report.
