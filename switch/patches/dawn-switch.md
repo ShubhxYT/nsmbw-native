@@ -51,6 +51,15 @@ by a comment). Without this, adapter discovery never succeeds.
 #endif
 ```
 
+## 4. `src/dawn/native/opengl/QueueGL.cpp` — no fence-sync extension
+
+`Queue::Queue` picks a fence type from the EGL extensions and ends in `DAWN_UNREACHABLE()` when none
+is advertised. Relaxing patch 2 leaves exactly that path reachable, and `DAWN_UNREACHABLE()` is
+undefined behaviour: it **hung device creation silently** rather than reporting anything, which cost
+several cycles to find. Under `__SWITCH__` fall back to `EGL_SYNC_FENCE`.
+
+This is the patch that lets `aurora_initialize()` return.
+
 ## Link line
 
 Once Dawn references EGL directly, the linker pulls Mesa's `egl_switch.c`, which needs the nouveau
@@ -75,3 +84,28 @@ With all of the above:
 
 The adapter is found and device creation begins, then stalls after printing the device limits, with
 no error — `aurora_initialize()` never returns. That is the next target.
+
+## Result
+
+```
+DAWN: dev buffers
+DAWN: device created
+RM: aurora status=0 error=(none)
+RM: gx hooks
+RM: reverb
+RM: frame boundary
+RM: runtime settings
+RM: updater
+RM: loading screen
+```
+
+Aurora fully initialises, and startup now stops later, at guest entry resolution:
+
+```
+REG: frozen lookup 80004050
+No translated function registered at address 0x80004050
+```
+
+Diagnostic marks were added to `PhysicalDeviceGL.cpp`, `ContextEGL.cpp`, `DeviceGL.cpp` and
+`QueueGL.cpp` (all `switch_trace_mark` calls); they are cheap to leave in and were what located the
+stall.
