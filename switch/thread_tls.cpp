@@ -10,10 +10,13 @@
 // before the real routine runs.
 #include <pthread.h>
 
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 
 #include "switch_tls.h"
 
+extern "C" void switch_trace_mark(const char*);
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                                      void* (*entry)(void*), void* argument);
 
@@ -47,5 +50,13 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
     }
     request->entry = entry;
     request->argument = argument;
-    return __real_pthread_create(thread, attr, &tls_start_routine, request);
+    errno = 0;
+    const int result = __real_pthread_create(thread, attr, &tls_start_routine, request);
+    if (result != 0) {
+        char line[96];
+        std::snprintf(line, sizeof line, "PTHREAD_CREATE failed rc=%d errno=%d", result, errno);
+        switch_trace_mark(line);
+        std::free(request);
+    }
+    return result;
 }

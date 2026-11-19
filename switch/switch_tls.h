@@ -52,7 +52,7 @@ extern "C" uint64_t g_switchTlsDelta;
 // Sentinel in .tdata: its address as the compiler computes it is exactly what calibration must get
 // right.
 extern "C" thread_local uint64_t g_switchTlsAnchor;
-extern "C" constexpr uint64_t kSwitchTlsSentinel = 0x4E534D4257544C53ull;  // "NSMBWTLS"
+extern "C" inline constexpr uint64_t kSwitchTlsSentinel = 0x4E534D4257544C53ull;  // "NSMBWTLS"
 
 // A separate function, so the compiler cannot hoist the mrs/add out of the calibration loop: with
 // tpidr_el0 still 0 the hoisted address is the raw TLS offset and the read faults before

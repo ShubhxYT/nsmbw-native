@@ -93,3 +93,21 @@ extern "C" int __wrap_pthread_once(pthread_once_t* once, void (*init)(void)) {
     switch_trace_mark(line);
     return result;
 }
+
+// libstdc++ throws std::system_error from here. pthread_once was measured returning rc=0 on every
+// call, so the errno value libstdc++ decides to throw with is the one fact still missing.
+extern "C" void __real__ZSt20__throw_system_errori(int code) __attribute__((noreturn));
+
+extern "C" void __wrap__ZSt20__throw_system_errori(int code) {
+    char line[96];
+    std::snprintf(line, sizeof line, "THROW_SYSTEM_ERROR code=%d", code);
+    switch_trace_mark(line);
+    {
+        TraceState state;
+        _Unwind_Backtrace(&trace_frame, &state);
+        char trace[420];
+        std::snprintf(trace, sizeof trace, "SETRACE%s", state.text);
+        switch_trace_mark(trace);
+    }
+    __real__ZSt20__throw_system_errori(code);
+}

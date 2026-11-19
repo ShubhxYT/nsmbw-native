@@ -178,3 +178,31 @@ Two hypotheses tested and disproved for the `std::call_once` -> `system_error(EN
 
 Next: wrap `std::__throw_system_error` itself and log its argument. That reports the exact errno
 libstdc++ decided to throw with, which is the one fact still missing.
+
+## The thrown code is 88, and it is thrown *inside* the call_once callable
+
+Wrapping `std::__throw_system_error` (mangled `_ZSt20__throw_system_errori` - note 20, not 19) and
+printing its argument gives:
+
+```
+THROW_SYSTEM_ERROR code=88
+```
+
+88 is newlib's `ENOSYS`. The backtrace taken at that instant explains why the earlier `pthread_once`
+measurement showed rc=0 on every call:
+
+```
+__throw_system_error(88)
+  <- std::_Function_handler<void(), std::call_once<...>>
+    <- pthread_once                 (our wrapper is on the stack; it never returned)
+      <- AdvanceRetrace <- AdvanceDueRetraces <- SelectThread <- OSSuspendThread
+```
+
+The callable runs *inside* `pthread_once`, so it throws before `pthread_once` can return - which is why
+the 8,525 logged calls were all rc=0: the failing one never got that far.
+
+`pthread_create` is also cleared: the wrapper logs failures and none appeared.
+
+So the ENOSYS comes from another pthread primitive used inside the retrace scheduler. libstdc++ turns a
+non-zero `pthread_mutex_lock`/`pthread_cond_wait` result into exactly this exception, so those are the
+next things to wrap and log.
