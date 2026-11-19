@@ -725,6 +725,10 @@ void Initialize(const std::vector<RegionRequest>& regions) {
               << " regions, " << Sections().size() << " backing stores)" << std::endl;
 }
 
+uint8_t* Base() {
+    return g_base;
+}
+
 uint8_t* HostPointer(uint32_t guestAddress) {
     if (!g_initialized) return nullptr;
 #if defined(__SWITCH__)

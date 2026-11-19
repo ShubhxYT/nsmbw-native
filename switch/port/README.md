@@ -149,3 +149,35 @@ REG: lookup 802dd2e0     ← and it calls back into the registry
 
 Startup now stops inside the game's first DOL constructor, with no crash artifact and no fault
 report.
+
+## MKW_FLAT_GUEST_BASE must be a runtime value on Horizon
+
+Translated guest code addresses guest memory directly as `MKW_FLAT_GUEST_BASE + addr`, and that macro
+was a compile-time constant: `GuestFlat::kFixedFlatGuestBase` (256 GiB on AArch64). Every other
+platform reserves exactly that address, so the constant is correct there.
+
+Horizon cannot place an allocation at a chosen address, so `EnsureReservation()` allocates the arena
+with `aligned_alloc` and sets `g_base` to whatever address it got. The checked accessors
+(`HostPointer`) use `g_base` and were therefore correct, but every *fast-path* access from generated
+code used the constant and pointed at unmapped memory. Nothing noticed until translated code ran for
+the first time:
+
+```
+InvalidMemoryRegionException: va=0x00000040816FFFF0
+```
+
+`0x4000000000 + 0x816FFFF0` — the 256 GiB base plus a MEM1 address.
+
+Fix: `GuestFlat::Base()` returns `g_base`, and under `__SWITCH__` the macro expands to it:
+
+```cpp
+#if defined(__SWITCH__)
+#define MKW_FLAT_GUEST_BASE (GuestFlat::Base())
+#else
+#define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+#endif
+```
+
+Because the macro is inlined into every object that touches guest memory, this requires recompiling
+the runtime, all 72 translated shards and all 16 registration shards — `switch/rebuild-flat-base.sh`
+does exactly that.
