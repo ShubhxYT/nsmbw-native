@@ -181,3 +181,24 @@ Fix: `GuestFlat::Base()` returns `g_base`, and under `__SWITCH__` the macro expa
 Because the macro is inlined into every object that touches guest memory, this requires recompiling
 the runtime, all 72 translated shards and all 16 registration shards — `switch/rebuild-flat-base.sh`
 does exactly that.
+
+## Progress after the runtime flat base
+
+With `MKW_FLAT_GUEST_BASE` a runtime value, **all 184 DOL constructors run and return** (they used to
+hang on the first), `RM: entry resolved` and `RM: fibers` are reached, and the guest executes far
+enough to produce its own error screen.
+
+Two smaller port issues surfaced in sequence and are fixed:
+
+* **`dsp_coef.bin`** — `FindDspCoefficientRom()` only looked beside the executable (absent on Horizon)
+  and then up from `current_path()`. It now also looks in the SD data directory, and the file ships
+  at `sdmc:/switch/nsmbw/dsp_coef.bin`.
+* **NAND root** — must be set in `Config.toml`. `sdmc:` values are *relative* to `std::filesystem`,
+  so a value like `sdmc:/switch/nsmbw/NAND` is joined onto the config directory and doubled
+  (`sdmc:/switch/nsmbw/sdmc:/switch/nsmbw/NAND`). Use `nand_root = "NAND"` and `dvd_root = "."`,
+  which resolve against the config file's directory.
+
+Current stop: `NANDOpen '/shared2/sys/SYSCONF'` fails. `SeedMissingBootstrapFiles()` needs a
+`wii_bootstrap` payload beside the executable, which Horizon has no notion of, so the NAND is never
+seeded and the guest hits its "disc could not be read" screen. Next: teach the seeding (and
+`RuntimeNandSettings::Ensure`) to work from the SD card, or ship a prepared NAND.
