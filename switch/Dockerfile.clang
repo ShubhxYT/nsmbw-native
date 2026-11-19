@@ -1,0 +1,11 @@
+# Switch toolchain plus a Clang new enough for devkitA64's libstdc++ 15.x, and LLD.
+# The translated code needs Clang extensions (__builtin_rotateleft32, ext_vector_type), and Clang 19
+# is the first that parses libstdc++ 15 cleanly.
+FROM nsmbw-switch
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        wget ca-certificates gpg \
+    && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main" > /etc/apt/sources.list.d/llvm19.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang-19 lld-19 \
+    && rm -rf /var/lib/apt/lists/*

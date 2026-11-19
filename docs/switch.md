@@ -183,3 +183,23 @@ The shape of the work is therefore a mapping change, not a redesign: Horizon has
 general reservation API** (the probe would not even compile with `<sys/mman.h>`), so the flat arena
 has to be placed in the alias region with the kernel's memory mapping calls instead of the portable
 mmap path the other platforms use.
+
+## Compiling the runtime for Horizon, measured
+
+With the toolchain fixed (Clang 19 against devkitA64's libstdc++ 15 — Clang 14 cannot parse it), the
+runtime's translation units were compiled for `aarch64-none-elf` one by one:
+
+| File | Result |
+|---|---|
+| `det_clock.cpp` | **compiles clean** |
+| `memory.cpp` | **compiles clean** |
+| `guest_flat_memory.cpp` | one wall: `sys/mman.h` does not exist on Horizon |
+| `game_folder.cpp`, `wii_remote_input.cpp` | include-path gap only (`toml.hpp`) |
+| `main.cpp` | needs SDL3, which has no Switch backend |
+
+So the port's shape is now concrete rather than guessed:
+
+1. **Guest memory**: replace the mmap path with the alias-region mapping (the probe showed a 6 GB
+   alias region and a 512 MB allocation that commits).
+2. **Platform layer**: replace SDL for window, pad, audio and timing with libnx.
+3. **Everything else** — the timing, memory and game logic — is already compiling.
