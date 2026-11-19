@@ -20,6 +20,9 @@
 
 #include <fcntl.h>
 
+extern "C" int g_switchTlsResult;
+extern "C" unsigned long long g_switchTlsDelta;
+
 namespace {
 
 // Where the host listener runs. Override at build time with -DNSMBW_LOG_HOST=\"...\".
@@ -108,6 +111,93 @@ bool Open() {
 // Runs before main(): the runtime writes to stdio during static initialisation in places.
 __attribute__((constructor)) static void switch_open_log_channel() { SwitchLog::Open(); }
 
+// ---------------------------------------------------------------------------------------------
+// TEMPORARY: per-constructor progress trace.
+//
+// The port stops after the priority-101 logger with no further output, and nothing in the image
+// reports which static initialiser it died in. .preinit_array runs before .init_array, so the hook
+// below can replace every .init_array slot with a trampoline that records the slot index and then
+// tail-calls the original initialiser. The last index written to init.log is the initialiser that
+// never returned. Written with raw write(2) so no stdio state is involved.
+// ---------------------------------------------------------------------------------------------
+extern "C" char __init_array_start[] __attribute__((weak));
+extern "C" char __init_array_end[] __attribute__((weak));
+
+namespace {
+
+constexpr int kMaxInitEntries = 512;
+void (*g_initTarget[kMaxInitEntries])(void);
+int g_initCount = 0;
+int g_initNext = 0;
+int g_initTraceFd = -1;
+
+void init_trace_index(int value) {
+    char digits[16];
+    int count = 0;
+    if (value == 0) {
+        digits[count++] = '0';
+    }
+    while (value > 0 && count < 16) {
+        digits[count++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    }
+    char buffer[24];
+    int out = 0;
+    for (int i = count - 1; i >= 0; --i) {
+        buffer[out++] = digits[i];
+    }
+    buffer[out++] = '\n';
+    // Open and close per line: the emulator's filesystem caches open handles, and a write that is
+    // still buffered when the guest dies would hide the very initialiser being hunted.
+    const int fd = ::open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        (void)!::write(fd, buffer, static_cast<size_t>(out));
+        ::close(fd);
+    }
+}
+
+void init_trampoline() {
+    const int index = g_initNext++;
+    init_trace_index(index);
+    if (index >= 0 && index < g_initCount) {
+        g_initTarget[index]();
+    }
+}
+
+void install_init_trace() {
+    if (__init_array_start == nullptr || __init_array_end == nullptr) {
+        return;
+    }
+    g_initTraceFd = ::open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (g_initTraceFd < 0) {
+        return;
+    }
+    auto** entries = reinterpret_cast<void (**)(void)>(__init_array_start);
+    const auto total =
+        (__init_array_end - __init_array_start) / static_cast<long>(sizeof(void*));
+    g_initCount = total < kMaxInitEntries ? static_cast<int>(total) : kMaxInitEntries;
+    for (int i = 0; i < g_initCount; ++i) {
+        g_initTarget[i] = entries[i];
+        entries[i] = &init_trampoline;
+    }
+}
+
+} // namespace
+
+// Called from main() so a run that gets past every initialiser says so.
+extern "C" void switch_trace_mark(const char* tag) {
+    if (tag == nullptr) {
+        return;
+    }
+    const int fd = ::open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        return;
+    }
+    (void)!::write(fd, tag, std::strlen(tag));
+    (void)!::write(fd, "\n", 1);
+    ::close(fd);
+}
+
 // Opens the log channel before any other static initialiser runs. Constructor priority 101 sorts ahead
 // of every default-priority (65535) initialiser, and .preinit_array runs before even those, so a crash
 // inside a global constructor still leaves evidence of how far the process got.
@@ -118,9 +208,11 @@ static void switch_log_earliest() {
     }
     done = true;
     const bool connected = SwitchLog::Open();
-    std::fprintf(stderr, "nsmbw: reached C++ runtime (log %s)\n",
-                 connected ? "socket" : "file");
+    std::fprintf(stderr, "nsmbw: reached C++ runtime (log %s) tls=%d delta=%llu\n",
+                 connected ? "socket" : "file", g_switchTlsResult,
+                 static_cast<unsigned long long>(g_switchTlsDelta));
     std::fflush(stderr);
+    install_init_trace();
 }
 
 __attribute__((constructor(101))) static void switch_log_earliest_ctor() { switch_log_earliest(); }

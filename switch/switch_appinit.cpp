@@ -8,7 +8,19 @@
 
 #include <cstdio>
 
+#include "switch_tls.h"
+
+// Definitions for the bootstrap's reporting state (declared in switch_tls.h).
+extern "C" int g_switchTlsResult = -1;
+extern "C" uint64_t g_switchTlsDelta = 0;
+extern "C" thread_local uint64_t g_switchTlsAnchor = kSwitchTlsSentinel;
+
 extern "C" void __appInit(void) {
+    // First: C++ thread_local is unusable until tpidr_el0 points at the TLS block. Nothing in libnx
+    // sets it (libnx reads tpidrro_el0, the IPC buffer), so any thread_local - toml11's parser spec,
+    // libstdc++ internals - dereferences null and dies as "Fault Address: 0".
+    SwitchTlsBootstrap();
+
     // Base IPC. Without this nothing else can be reached.
     smInitialize();
 
@@ -36,10 +48,3 @@ extern "C" void __appExit(void) {
     fsExit();
     smExit();
 }
-
-// libnx applies the module's dynamic relocations itself (__nx_dynamic -> _dynProcessRela/Relr). That
-// walker faults on our image, dying before main(). The system loader has already relocated an
-// installed title, so make the library's pass a no-op and let execution continue.
-// __nx_dynamic is NOT overridden any more: libnx must apply the module's relocations. The reason it
-// used to fault is that --spare-dynamic-tags=0 leaves no room for the DT_NULL terminator, so the tag
-// loop ran past the end of .dynamic. The link now passes -z spare-dynamic-tags=1.

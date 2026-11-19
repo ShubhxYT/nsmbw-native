@@ -1,0 +1,1652 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include <toml.hpp>
+#include "platform/host_platform.h"
+#include "runtime_product.h"
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shlobj.h>
+#else
+#include <cstdlib>
+#include <unistd.h>
+#endif
+
+struct RuntimeUserConfig {
+    std::optional<bool> widescreen;
+    std::optional<bool> forceAspect169;
+    std::optional<int32_t> aspectMode;  // 0 original 4:3, 1 16:9, 2 fill the window (DisplaySettings)
+    std::optional<int32_t> gpuCompat;  // 0 auto (by graphics adapter), 1 on, 2 off (AuroraGpuCompat)
+    std::optional<int32_t> windowPosX;
+    std::optional<int32_t> windowPosY;
+    std::optional<uint32_t> windowWidth;
+    std::optional<uint32_t> windowHeight;
+    std::optional<float> resolutionMultiplier;
+    std::optional<std::string> graphicsApi;
+    std::optional<std::string> displayMode;
+    std::optional<uint32_t> frameInterpolationFps;
+    std::optional<bool> metalFxSpatialUpscaling;
+    std::optional<bool> skipUnreadyPipelines;
+    std::optional<bool> disableCopyFilter;
+    std::optional<bool> textureReplacements;
+    std::optional<bool> textureDumps;
+    std::optional<bool> showFps;
+    std::optional<bool> spinningCoins;  // NSMBW: [video] spinning_coins, animated tiles
+    std::optional<bool> frameGraph;     // NSMBW: [video] frame_graph, frame times under the FPS counter
+    std::optional<bool> touchControls;  // NSMBW: [video] touch_controls, written by the Android app
+    std::optional<uint32_t> frameGraphSize;  // NSMBW: [video] frame_graph_size, percent (5-200; 50 = the original size)
+    std::optional<bool> vsync;          // NSMBW: [video] vsync, presents wait for the display (Windows)
+    std::optional<bool> batterySaver;   // NSMBW: [video] battery_saver, every other frame drawn (30 FPS)
+    std::optional<std::string> language;  // NSMBW: [game] language, "en" "es" "fr" (the USA disc's) or "it"
+    std::optional<bool> noTimeLimit;      // NSMBW: [game] no_time_limit, the course timer stands still
+    std::optional<bool> infiniteLives;    // NSMBW: [game] infinite_lives, a miss costs no life
+    std::optional<uint32_t> powerUp;      // NSMBW: [game] power_up, the Power-Up picked (GameplayOptions)
+    std::optional<bool> cheatButton;      // NSMBW: [game] cheat_button, Android's on-screen Cheat button
+    // NSMBW: [game] file1_character..file3_character, P1's character on each save file (the file
+    // select's picker): 0 Mario, 1 Luigi, 2 Blue Toad, 3 Yellow Toad.
+    std::array<std::optional<uint32_t>, 3> fileCharacters;
+    // NSMBW: [game] file1_cheated..file3_cheated, the file select's "Cheated" on a save file that
+    // Infinite Lives or the Power-Up was used on.
+    std::array<std::optional<bool>, 3> fileCheated;
+    std::optional<uint32_t> disabledPostProcessingPaths;
+    std::optional<float> audioVolume;
+    std::optional<float> audioMusicVolume;
+    std::optional<float> audioSoundEffectsVolume;
+    std::optional<float> audioUiVolume;
+    std::optional<float> audioVoicesVolume;
+    std::optional<bool> audioMuted;
+    std::optional<bool> audioMixWorker;
+    std::optional<bool> attenuateMusicWhenMediaPlays;
+    // Real Wii Remotes (with or without Nunchuk / Classic Controller) and Wii U Pro
+    // Controllers paired over Bluetooth, driven by SDL's HIDAPI Wii driver. The driver
+    // is opt-in on SDL's side, so this decides whether the runtime turns it on.
+    std::optional<bool> wiiRemotes;
+    // Keep re-enumerating Bluetooth HID devices while no Wii controller is connected
+    // (Dolphin's "continuous scanning"), so a remote that dropped or was switched on
+    // after launch shows up without restarting.
+    std::optional<bool> wiiContinuousScan;
+    // NSMBW: [input] bluetooth_passthrough, "off" (the default until it's been tried on real hardware),
+    // "auto" or "on". With a USB Bluetooth adapter this runtime can claim (on the WinUSB driver on Windows,
+    // permitted on Linux), the game's own Wii Remote stack drives real Wii Remotes through it as on a Wii,
+    // speaker included (bt_passthrough.h); "auto" uses one when there is one. Read once at startup.
+    std::optional<std::string> bluetoothPassthrough;
+    // Accelerometer zero-point correction for the Bluetooth Wii Remote, in g and in
+    // SDL's sensor frame (x right, y out of the button face, z towards the user).
+    // SDL's Wii driver falls back to a nominal zero point when its read of the
+    // remote's calibration block times out (common over Bluetooth), so this is
+    // measured in the overlay with the remote at rest.
+    std::optional<double> wiiAccelOffsetX;
+    std::optional<double> wiiAccelOffsetY;
+    std::optional<double> wiiAccelOffsetZ;
+    // Debugging aid: append every KPAD sample of the Bluetooth remote (raw and
+    // corrected accelerometer, buttons) to wii_accel_trace.csv next to Config.toml.
+    std::optional<bool> wiiAccelTrace;
+    std::optional<bool> networkEnabled;
+    std::optional<bool> discordPresenceEnabled;
+    // The application ID of the WiiCompiled Discord application. This is only
+    // used by the base product; Retro Rewind supplies its own ID through the
+    // standard Dolphin /dev/dolphin interface.
+    std::optional<std::string> discordClientId;
+    std::optional<std::string> nandRoot;
+    std::optional<std::string> dvdRoot;
+    // The one canonical Retro Rewind installation, owned and updated by the frontend. Setup records
+    // it here instead of copying the pack, so an asset-only update is visible on the next launch.
+    std::optional<std::string> retroRewindRoot;
+    std::vector<std::string> overlayRoots;
+    // Controller mappings use Wii/GameCube button names as keys and up to two
+    // comma-separated SDL-style physical button names ("south", or
+    // "dpad_up,left_shoulder") as values; pressing either bound button counts.
+    std::array<std::optional<std::string>, 12> controllerButtons;
+    // The sideways remote's own motions, picked in F10 > Controller settings: tilt_left, tilt_right and
+    // shake, each one physical input name ("left_trigger", "right_stick_left@30"). Unset = the built-in input.
+    std::array<std::optional<std::string>, 3> remoteActions;
+    std::optional<bool> rumbleEnabled;
+    // Which family's button names the runtime prints: 0 auto (both, e.g. "South (A / Cross)"),
+    // 1 PlayStation, 2 Xbox, 3 Nintendo. [controller] button_layout.
+    std::optional<int32_t> buttonLayout;
+    std::optional<int32_t> muteHotkey;
+    // Netplay: frames of input delay to ask for, 0 or unset = sized from the measured round trip and
+    // jitter when a session starts. [netplay] input_delay; see InputDelayFrames in netplay_lobby.cpp.
+    std::optional<int32_t> netplayInputDelay;
+    std::map<std::string, std::string> controllerExpressions;
+    // NSMBW: [keyboard] action = "comma-separated SDL scancode names" (keybinds.h).
+    std::map<std::string, std::string> keyboardBindings;
+    // Combination bindings ([keyboard] and [controller] "<action>_combos"): lists of member lists,
+    // TOML arrays so no member name needs a separator ("jump_combos = [["Left Ctrl", "X"]]"). Older
+    // builds read only strings from those tables, and pass over these.
+    std::map<std::string, std::vector<std::vector<std::string>>> keyboardCombos;
+    std::map<std::string, std::vector<std::vector<std::string>>> controllerCombos;
+};
+
+extern "C" void switch_trace_mark(const char*);
+
+namespace RuntimeConfigFile {
+
+// Narrow path strings are UTF-8 everywhere in the runtime; string() and the
+// char path constructor would use the ANSI codepage on Windows, which drops
+// characters the codepage cannot represent.
+inline std::string PathToUtf8(const std::filesystem::path& path) {
+    const std::u8string text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
+inline std::filesystem::path PathFromUtf8(std::string_view text) {
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+inline constexpr const char* kConfigFileName = "Config.toml";
+inline constexpr const char* kApplicationDirectoryName = "WiiCompiled";
+
+// Portable layout. A directory holding kPortableMarkerFileName is a portable root; every piece of
+// runtime user state (Config.toml, NAND, Cache, Logs) lives in <root>/UserData instead of
+// %LOCALAPPDATA%. The marker is searched for from the executable's directory upwards, which is what
+// makes an installation survive being moved or carried on removable media.
+inline constexpr const char* kPortableMarkerFileName = "portable.txt";
+inline constexpr const char* kPortableUserDataDirectoryName = "UserData";
+
+// The installed layout puts products two levels below the root (<root>/Install/Base/game.exe). The
+// bound is deliberately small so an unrelated marker far up a drive can never capture an ordinary
+// installation.
+inline constexpr int kPortableSearchDepth = 4;
+
+inline std::string Trim(std::string_view text) {
+    size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return std::string(text.substr(begin, end - begin));
+}
+
+inline std::string RemoveComment(std::string_view line) {
+    bool inSingle = false;
+    bool inDouble = false;
+    bool escaped = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (inDouble && ch == '\\' && !escaped) {
+            escaped = true;
+            continue;
+        }
+        if (ch == '\'' && !inDouble) {
+            inSingle = !inSingle;
+        } else if (ch == '"' && !inSingle && !escaped) {
+            inDouble = !inDouble;
+        } else if (ch == '#' && !inSingle && !inDouble) {
+            return std::string(line.substr(0, i));
+        }
+        escaped = false;
+    }
+    return std::string(line);
+}
+
+inline bool IsSupportedResolutionMultiplier(float value) {
+    static constexpr std::array values{0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f};
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+// Must stay in step with the backend table in main.cpp, which is what actually
+// maps these to AuroraBackend.
+inline bool IsSupportedGraphicsApi(std::string_view value) {
+#if defined(__APPLE__)
+    static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
+#elif defined(__ANDROID__)
+    static constexpr std::array<std::string_view, 3> values{"auto", "vulkan", "opengles"};
+// only vulkan for linux
+#elif defined(__linux__)
+    static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
+#elif defined(_WIN32)
+    static constexpr std::array<std::string_view, 4> values{"auto", "d3d12", "vulkan", "d3d11"};
+#elif defined(__SWITCH__)
+    static constexpr std::array<std::string_view, 2> values{"auto", "deko3d"};
+#endif
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+inline bool IsSupportedDisplayMode(std::string_view value) {
+    static constexpr std::array<std::string_view, 3> values{
+        "windowed", "borderless", "exclusive",
+    };
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+// NSMBW: 0 (off), 60 (only does anything with Battery Saver, whose pictures come at 30), 120, 180,
+// 240 and 300.
+inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
+    return value == 0 || value == 60 || value == 120 || value == 180 || value == 240 || value == 300;
+}
+
+// NSMBW: the compat build (for older processors) lives in a "compat" folder inside the download; its
+// installation, where the data files and the "game" folder are, is the folder above it.
+inline std::filesystem::path InstallationDirectory(const std::filesystem::path& programDirectory) {
+    std::error_code ec;
+    if (programDirectory.filename() == "compat" &&
+        std::filesystem::is_regular_file(programDirectory.parent_path() / "dsp_coef.bin", ec)) {
+        return programDirectory.parent_path();
+    }
+    return programDirectory;
+}
+
+// The installation's directory: the executable's, or the one above it for the compat build.
+inline std::optional<std::filesystem::path> ExecutableDirectory() {
+#ifdef _WIN32
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return std::nullopt;
+        }
+        if (length < buffer.size() - 1) {
+            buffer.resize(length);
+            return InstallationDirectory(std::filesystem::path(buffer).parent_path());
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#elif defined(__APPLE__) || defined(__ANDROID__)
+    return RuntimePlatform::ExecutableDirectory();
+#else
+    // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
+    // does not NUL-terminate and silently truncates if the buffer is too small, so this grows
+    // the buffer until the result no longer fills it completely, the same doubling strategy as
+    // the Windows branch above uses for GetModuleFileNameW.
+    std::string buffer(256, '\0');
+    for (;;) {
+        const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (length < 0) {
+            return std::nullopt;
+        }
+        if (static_cast<size_t>(length) < buffer.size()) {
+            buffer.resize(static_cast<size_t>(length));
+            return InstallationDirectory(std::filesystem::path(buffer).parent_path());
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#endif
+}
+
+// NSMBW: the Windows downloads up to 0.0.7 shipped this marker; such a folder is an old release,
+// whose UserData moves to Documents\MarioWiiSaveData (AdoptEarlierUserData), not a portable root.
+inline bool IsReleasedNsmbwMarker(const std::filesystem::path& marker) {
+    std::ifstream input(marker);
+    std::string line;
+    std::getline(input, line);
+    return line.rfind("Keep this file: settings, saves and caches stay in the UserData", 0) == 0;
+}
+
+// The portable root this executable lives under, or nullopt for a normal installation. The answer
+// cannot change while the process runs, so it is resolved exactly once: every user-state path
+// derives from it and they must not disagree with each other.
+inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
+    static const std::optional<std::filesystem::path> root = []() -> std::optional<std::filesystem::path> {
+        const auto executableDirectory = ExecutableDirectory();
+        if (!executableDirectory) {
+            return std::nullopt;
+        }
+        std::filesystem::path current = *executableDirectory;
+        for (int level = 0; level <= kPortableSearchDepth; ++level) {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(current / kPortableMarkerFileName, ec) &&
+                !IsReleasedNsmbwMarker(current / kPortableMarkerFileName)) {
+                return current;
+            }
+            const auto parent = current.parent_path();
+            if (parent.empty() || parent == current) {
+                break;
+            }
+            current = parent;
+        }
+        return std::nullopt;
+    }();
+    return root;
+}
+
+#ifdef _WIN32
+// NSMBW: on Windows the settings (with the game folder), saves and caches live in
+// Documents\MarioWiiSaveData, so a new version extracted anywhere carries on where the last left off.
+inline constexpr const wchar_t* kDocumentsDataDirectoryName = L"MarioWiiSaveData";
+
+// The first start with an empty MarioWiiSaveData takes over the newest earlier data: a portable
+// UserData beside this executable or beside another version's NSMBW.exe in the folder above it
+// (each release extracts to its own NSMBW-x.y.z-windows-x64 folder), or %LOCALAPPDATA%\WiiCompiled.
+// Logs stay behind.
+inline void AdoptEarlierUserData(const std::filesystem::path& target) {
+    std::error_code ec;
+    if (std::filesystem::exists(target / kConfigFileName, ec)) {
+        return;
+    }
+    std::vector<std::filesystem::path> candidates;
+    if (const auto executableDirectory = ExecutableDirectory()) {
+        candidates.push_back(*executableDirectory / kPortableUserDataDirectoryName);
+        const auto parent = executableDirectory->parent_path();
+        for (std::filesystem::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->is_directory(ec) && it->path() != *executableDirectory) {
+                candidates.push_back(it->path() / kPortableUserDataDirectoryName);
+            }
+        }
+    }
+    PWSTR localPath = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localPath)) && localPath) {
+        candidates.push_back(std::filesystem::path(localPath) / kApplicationDirectoryName);
+        CoTaskMemFree(localPath);
+    }
+    std::optional<std::filesystem::path> newest;
+    std::filesystem::file_time_type newestTime{};
+    for (const auto& candidate : candidates) {
+        std::error_code timeError;
+        const auto time = std::filesystem::last_write_time(candidate / kConfigFileName, timeError);
+        if (!timeError && (!newest || time > newestTime)) {
+            newest = candidate;
+            newestTime = time;
+        }
+    }
+    if (!newest) {
+        return;
+    }
+    std::filesystem::create_directories(target, ec);
+    for (std::filesystem::directory_iterator it(*newest, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().filename() == "Logs") {
+            continue;
+        }
+        std::error_code copyError;
+        std::filesystem::copy(it->path(), target / it->path().filename(),
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing,
+                              copyError);
+    }
+}
+#endif
+
+inline std::filesystem::path BaseApplicationDataDirectory();
+
+// A mod (RuntimeProduct userDataFolder) keeps its own settings, saves and caches: Documents\<folder>
+// on Windows, <folder> inside the base game's data folder elsewhere.
+inline std::filesystem::path ApplicationDataDirectory() {
+    const std::string_view modFolder = RuntimeProduct::Active().userDataFolder;
+    if (modFolder.empty()) {
+        return BaseApplicationDataDirectory();
+    }
+#ifdef _WIN32
+    if (!PortableRootDirectory()) {
+        PWSTR documentsPath = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_CREATE, nullptr, &documentsPath)) &&
+            documentsPath != nullptr) {
+            const std::filesystem::path directory = std::filesystem::path(documentsPath) / std::filesystem::u8path(modFolder);
+            CoTaskMemFree(documentsPath);
+            return directory;
+        }
+    }
+#endif
+    return BaseApplicationDataDirectory() / std::filesystem::u8path(modFolder);
+}
+
+inline std::filesystem::path BaseApplicationDataDirectory() {
+    if (const auto& portableRoot = PortableRootDirectory()) {
+        return *portableRoot / kPortableUserDataDirectoryName;
+    }
+#if defined(__SWITCH__)
+    // Horizon mounts the SD card at sdmc:. Everything the port owns lives under one directory, so
+    // Config.toml, UserData and the extracted game sit beside the .nro.
+    return std::filesystem::path("sdmc:/switch/nsmbw");
+#elif defined(_WIN32)
+    static const std::optional<std::filesystem::path> documents = []() -> std::optional<std::filesystem::path> {
+        PWSTR documentsPath = nullptr;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_CREATE, nullptr, &documentsPath)) ||
+            documentsPath == nullptr) {
+            return std::nullopt;
+        }
+        const std::filesystem::path directory = std::filesystem::path(documentsPath) / kDocumentsDataDirectoryName;
+        CoTaskMemFree(documentsPath);
+        AdoptEarlierUserData(directory);
+        return directory;
+    }();
+    if (documents) {
+        return *documents;
+    }
+    PWSTR rawPath = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &rawPath)) && rawPath) {
+        const std::filesystem::path directory = std::filesystem::path(rawPath) / kApplicationDirectoryName;
+        CoTaskMemFree(rawPath);
+        return directory;
+    }
+#elif defined(__APPLE__) || defined(__ANDROID__)
+    return RuntimePlatform::ApplicationDataDirectory(kApplicationDirectoryName);
+#else
+    // XDG Base Directory spec equivalent of FOLDERID_LocalAppData: $XDG_DATA_HOME if set and
+    // non-empty, otherwise its default of $HOME/.local/share.
+    if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"); xdgDataHome && *xdgDataHome) {
+        return std::filesystem::path(xdgDataHome) / kApplicationDirectoryName;
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".local" / "share" / kApplicationDirectoryName;
+    }
+#endif
+    return std::filesystem::current_path() / kApplicationDirectoryName;
+}
+
+inline std::filesystem::path ResolveConfigPath() {
+    return ApplicationDataDirectory() / kConfigFileName;
+}
+
+inline void EnsureConfigFile() {
+    const std::filesystem::path path = ResolveConfigPath();
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec || std::filesystem::exists(path, ec)) {
+        return;
+    }
+
+    std::ofstream output(path);
+    if (!output) {
+        return;
+    }
+    output << "# WiiCompiled user configuration\n"
+              "# paths.dvd_root is your New Super Mario Bros. Wii (SMNE01 rev 1), extracted with\n"
+              "# Dolphin's Extract Entire Disc. The game asks for it at first start.\n\n"
+              "[video]\n"
+              "widescreen = true\n"
+              "force_16_9 = false\n"
+              "resolution_multiplier = 1.0\n"
+              "frame_interpolation_fps = 0\n"
+              "display_mode = \"windowed\"\n"
+              "graphics_api = \"auto\"\n"
+              "skip_unready_pipelines = true\n"
+              "disable_copy_filter = true\n"
+              "show_fps = false\n"
+              "# Dolphin-style custom textures. When enabled, the renderer indexes\n"
+              "# texture_replacements/ next to this file at startup and substitutes\n"
+              "# any tex1_<W>x<H>_<hash>[_<tlut hash>]_<format>.dds or .png it finds\n"
+              "# there for the matching game texture. texture_dumps writes every\n"
+              "# unmatched texture to Cache/texture_dumps under the name a\n"
+              "# replacement would need. Both are read once, at startup.\n"
+              "texture_replacements = false\n"
+              "texture_dumps = false\n\n"
+              "[audio]\n"
+              "volume = 1.0\n"
+              "music_volume = 1.0\n"
+              "sound_effects_volume = 1.0\n"
+              "ui_volume = 1.0\n"
+              "voices_volume = 1.0\n"
+              "muted = false\n"
+              "attenuate_music_when_media_plays = false\n"
+              "# Runs the AX/DSP voice mix on its own thread, joined before the\n"
+              "# guest can observe it. Set to false to mix inline on the guest\n"
+              "# thread exactly as the runtime did before.\n"
+              "mix_worker = true\n\n"
+              "[network]\n"
+              "enabled = true\n\n"
+              "[discord]\n"
+              "# Rich Presence talks only to a locally-running Discord client.\n"
+              "# Retro Rewind supplies its official app ID automatically. Set this\n"
+              "# to WiiCompiled's Discord application ID for basic base-game presence.\n"
+              "enabled = true\n"
+              "# client_id = \"123456789012345678\"\n\n"
+              "[paths]\n"
+              "# dvd_root = \"D:\\\\Games\\\\NSMBW\"\n"
+              "# nand_root = \"D:\\\\WiiNand\"\n"
+              "# retro_rewind_root = \"D:\\\\RetroRewind\\\\RetroRewind6\"\n"
+              "# overlay_roots = [\"D:\\\\RetroRewind\"]\n";
+}
+
+template <typename T>
+inline std::optional<T> FindConfigValue(
+    const toml::value& document, std::string_view section, std::string_view key) {
+    try {
+        return toml::find<T>(document, std::string(section), std::string(key));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+inline std::optional<uint32_t> FindConfigUint(
+    const toml::value& document, std::string_view section, std::string_view key) {
+    const auto value = FindConfigValue<int64_t>(document, section, key);
+    if (!value || *value < 0 || static_cast<uint64_t>(*value) > UINT32_MAX) {
+        return std::nullopt;
+    }
+    return static_cast<uint32_t>(*value);
+}
+
+inline std::optional<int32_t> FindConfigInt(
+    const toml::value& document, std::string_view section, std::string_view key) {
+    const auto value = FindConfigValue<int64_t>(document, section, key);
+    if (!value || *value < INT32_MIN || *value > INT32_MAX) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(*value);
+}
+
+inline std::optional<float> FindConfigFloat(
+    const toml::value& document, std::string_view section, std::string_view key) {
+    std::optional<double> value = FindConfigValue<double>(document, section, key);
+    if (!value) {
+        if (const auto integer = FindConfigValue<int64_t>(document, section, key)) {
+            value = static_cast<double>(*integer);
+        }
+    }
+    if (!value || !std::isfinite(*value) ||
+        *value < -static_cast<double>(std::numeric_limits<float>::max()) ||
+        *value > static_cast<double>(std::numeric_limits<float>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<float>(*value);
+}
+
+inline void AppendOverlayRoots(RuntimeUserConfig& config, const std::string& roots) {
+    size_t begin = 0;
+    while (begin < roots.size()) {
+        const size_t end = roots.find(';', begin);
+        std::string root = Trim(std::string_view(roots).substr(begin, end - begin));
+        if (!root.empty()) {
+            config.overlayRoots.push_back(std::move(root));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+}
+
+// "<action>_combos": a combination binding key.
+inline bool IsComboKey(std::string_view key) {
+    constexpr std::string_view kSuffix = "_combos";
+    return key.size() > kSuffix.size() && key.substr(key.size() - kSuffix.size()) == kSuffix;
+}
+
+// [["Left Ctrl", "X"], ...]: the member lists, leaving out anything that isn't a list of strings.
+inline std::vector<std::vector<std::string>> ReadCombos(const toml::value& value) {
+    std::vector<std::vector<std::string>> combos;
+    for (const auto& entry : value.as_array()) {
+        if (!entry.is_array()) {
+            continue;
+        }
+        std::vector<std::string> members;
+        for (const auto& member : entry.as_array()) {
+            if (member.is_string()) {
+                members.push_back(member.as_string());
+            }
+        }
+        if (!members.empty()) {
+            combos.push_back(std::move(members));
+        }
+    }
+    return combos;
+}
+
+// Reads every supported setting out of a parsed Config.toml document.
+inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+    RuntimeUserConfig config;
+
+    static constexpr std::array<std::string_view, 12> buttonKeys = {
+        "a", "b", "x", "y", "start", "z", "l", "r", "up", "down", "left", "right",
+    };
+    for (size_t index = 0; index < buttonKeys.size(); ++index) {
+        config.controllerButtons[index] =
+            FindConfigValue<std::string>(document, "controller", buttonKeys[index]);
+    }
+    static constexpr std::array<std::string_view, 3> remoteActionKeys = {"tilt_left", "tilt_right", "shake"};
+    for (size_t index = 0; index < remoteActionKeys.size(); ++index) {
+        config.remoteActions[index] =
+            FindConfigValue<std::string>(document, "controller", remoteActionKeys[index]);
+    }
+
+    config.rumbleEnabled = FindConfigValue<bool>(document, "controller", "rumble");
+    if (auto value = FindConfigInt(document, "controller", "button_layout"); value && *value >= 0 && *value <= 3) {
+        config.buttonLayout = *value;
+    }
+    if (auto value = FindConfigInt(document, "netplay", "input_delay"); value && *value >= 0 && *value <= 20) {
+        config.netplayInputDelay = *value;
+    }
+    if (auto value = FindConfigInt(document, "audio", "mute_key")) {
+        config.muteHotkey = *value;
+    }
+
+    if (const auto* section = document.contains("controller") ? &document.at("controller") : nullptr;
+        section != nullptr && section->is_table()) {
+        for (const auto& [key, value] : section->as_table()) {
+            if (key.rfind("expr_", 0) == 0 && value.is_string()) {
+                config.controllerExpressions[key] = value.as_string();
+            } else if (IsComboKey(key) && value.is_array()) {
+                config.controllerCombos[key] = ReadCombos(value);
+            }
+        }
+    }
+
+    if (const auto* section = document.contains("keyboard") ? &document.at("keyboard") : nullptr;
+        section != nullptr && section->is_table()) {
+        for (const auto& [key, value] : section->as_table()) {
+            if (value.is_string()) {
+                config.keyboardBindings[key] = value.as_string();
+            } else if (IsComboKey(key) && value.is_array()) {
+                config.keyboardCombos[key] = ReadCombos(value);
+            }
+        }
+    }
+
+    config.widescreen = FindConfigValue<bool>(document, "video", "widescreen");
+    config.forceAspect169 = FindConfigValue<bool>(document, "video", "force_16_9");
+    if (auto value = FindConfigInt(document, "video", "aspect_mode"); value && *value >= 0 && *value <= 3) {
+        config.aspectMode = *value;
+    }
+    if (auto value = FindConfigInt(document, "video", "gpu_compat"); value && *value >= 0 && *value <= 2) {
+        config.gpuCompat = *value;
+    }
+    config.windowPosX = FindConfigInt(document, "video", "window_x");
+    config.windowPosY = FindConfigInt(document, "video", "window_y");
+    if (auto value = FindConfigUint(document, "video", "window_width"); value && *value != 0) {
+        config.windowWidth = *value;
+    }
+    if (auto value = FindConfigUint(document, "video", "window_height"); value && *value != 0) {
+        config.windowHeight = *value;
+    }
+    if (auto value = FindConfigFloat(document, "video", "resolution_multiplier");
+        value && IsSupportedResolutionMultiplier(*value)) {
+        config.resolutionMultiplier = *value;
+    }
+    if (auto value = FindConfigValue<std::string>(document, "video", "graphics_api")) {
+        if (IsSupportedGraphicsApi(*value)) {
+            config.graphicsApi = *value;
+        } else {
+            std::cerr << "[runtime] Unknown video.graphics_api=\"" << *value
+                      << "\", using the automatic backend" << std::endl;
+        }
+    }
+    if (auto value = FindConfigValue<std::string>(document, "video", "display_mode");
+        value && IsSupportedDisplayMode(*value)) {
+        config.displayMode = *value;
+    }
+    if (auto value = FindConfigUint(document, "video", "frame_interpolation_fps")) {
+        if (IsSupportedFrameInterpolationFps(*value)) {
+            config.frameInterpolationFps = *value;
+        }
+    }
+    config.metalFxSpatialUpscaling =
+        FindConfigValue<bool>(document, "video", "metalfx_spatial_upscaling");
+    config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
+    config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
+    config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
+    config.spinningCoins = FindConfigValue<bool>(document, "video", "spinning_coins");
+    config.frameGraph = FindConfigValue<bool>(document, "video", "frame_graph");
+    config.frameGraphSize = FindConfigUint(document, "video", "frame_graph_size");
+    config.touchControls = FindConfigValue<bool>(document, "video", "touch_controls");
+    config.vsync = FindConfigValue<bool>(document, "video", "vsync");
+    config.batterySaver = FindConfigValue<bool>(document, "video", "battery_saver");
+    if (auto value = FindConfigValue<std::string>(document, "game", "language");
+        value && (*value == "en" || *value == "es" || *value == "fr" || *value == "it")) {
+        config.language = *value;
+    }
+    config.noTimeLimit = FindConfigValue<bool>(document, "game", "no_time_limit");
+    config.infiniteLives = FindConfigValue<bool>(document, "game", "infinite_lives");
+    config.powerUp = FindConfigUint(document, "game", "power_up");
+    config.cheatButton = FindConfigValue<bool>(document, "game", "cheat_button");
+    for (size_t file = 0; file < config.fileCharacters.size(); ++file) {
+        const std::string key = "file" + std::to_string(file + 1) + "_character";
+        if (auto value = FindConfigUint(document, "game", key.c_str()); value && *value <= 3) {
+            config.fileCharacters[file] = *value;
+        }
+        config.fileCheated[file] = FindConfigValue<bool>(document, "game", "file" + std::to_string(file + 1) + "_cheated");
+    }
+    config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
+    config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
+    if (auto value = FindConfigUint(document, "video", "disabled_post_processing_paths");
+        value && (*value & ~0x10u) == 0) {
+        config.disabledPostProcessingPaths = *value & 0x10u;
+    }
+
+    auto readVolume = [&](std::string_view key) -> std::optional<float> {
+        auto value = FindConfigFloat(document, "audio", key);
+        return value && *value >= 0.0f && *value <= 1.0f ? value : std::nullopt;
+    };
+    config.audioVolume = readVolume("volume");
+    config.audioMusicVolume = readVolume("music_volume");
+    config.audioSoundEffectsVolume = readVolume("sound_effects_volume");
+    config.audioUiVolume = readVolume("ui_volume");
+    config.audioVoicesVolume = readVolume("voices_volume");
+    config.audioMuted = FindConfigValue<bool>(document, "audio", "muted");
+    config.audioMixWorker = FindConfigValue<bool>(document, "audio", "mix_worker");
+    config.attenuateMusicWhenMediaPlays =
+        FindConfigValue<bool>(document, "audio", "attenuate_music_when_media_plays");
+    config.wiiRemotes = FindConfigValue<bool>(document, "controller", "wii_remotes");
+    config.wiiContinuousScan = FindConfigValue<bool>(document, "controller", "wii_continuous_scan");
+    if (auto value = FindConfigValue<std::string>(document, "input", "bluetooth_passthrough");
+        value && (*value == "auto" || *value == "on" || *value == "off")) {
+        config.bluetoothPassthrough = *value;
+    }
+    config.wiiAccelOffsetX = FindConfigValue<double>(document, "controller", "wii_accel_offset_x");
+    config.wiiAccelOffsetY = FindConfigValue<double>(document, "controller", "wii_accel_offset_y");
+    config.wiiAccelOffsetZ = FindConfigValue<double>(document, "controller", "wii_accel_offset_z");
+    config.wiiAccelTrace = FindConfigValue<bool>(document, "controller", "wii_accel_trace");
+    config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
+    config.discordPresenceEnabled = FindConfigValue<bool>(document, "discord", "enabled");
+    config.discordClientId = FindConfigValue<std::string>(document, "discord", "client_id");
+
+    config.nandRoot = FindConfigValue<std::string>(document, "paths", "nand_root");
+    config.dvdRoot = FindConfigValue<std::string>(document, "paths", "dvd_root");
+    config.retroRewindRoot = FindConfigValue<std::string>(document, "paths", "retro_rewind_root");
+    if (auto roots = FindConfigValue<std::vector<std::string>>(document, "paths", "overlay_roots")) {
+        for (auto& root : *roots) {
+            root = Trim(root);
+            if (!root.empty()) {
+                config.overlayRoots.push_back(std::move(root));
+            }
+        }
+    } else if (auto roots = FindConfigValue<std::string>(document, "paths", "overlay_roots")) {
+        AppendOverlayRoots(config, *roots);
+    }
+
+    return config;
+}
+
+inline RuntimeUserConfig ParseConfig(std::istream& input, std::string sourceName = "Config.toml") {
+    // A UTF-8 byte order mark (some editors add one) is not TOML: skip it rather than lose every setting.
+    if (input.peek() == 0xEF) {
+        char bom[3] = {};
+        input.read(bom, 3);
+        if (static_cast<unsigned char>(bom[1]) != 0xBB || static_cast<unsigned char>(bom[2]) != 0xBF) {
+            input.clear();
+            input.seekg(0);
+        }
+    }
+    try {
+        return ParseConfigDocument(toml::parse(input, std::move(sourceName)));
+    } catch (const std::exception& exception) {
+        std::cerr << "[runtime-config] Invalid TOML; using built-in defaults: "
+                  << exception.what() << std::endl;
+        return {};
+    }
+}
+
+inline RuntimeUserConfig LoadConfigFile() {
+    switch_trace_mark("CFG ensure");
+    EnsureConfigFile();
+    switch_trace_mark("CFG ensured");
+    std::ifstream file(ResolveConfigPath(), std::ios::binary);
+    switch_trace_mark(file ? "CFG opened" : "CFG open failed");
+    if (!file) {
+        return RuntimeUserConfig{};
+    }
+    RuntimeUserConfig parsed = ParseConfig(file, PathToUtf8(ResolveConfigPath()));
+    switch_trace_mark("CFG parsed");
+    return parsed;
+}
+
+inline const RuntimeUserConfig& Get() {
+    switch_trace_mark("CFG enter");
+    static RuntimeUserConfig config = LoadConfigFile();
+    switch_trace_mark("CFG loaded");
+    return config;
+}
+
+inline RuntimeUserConfig& Mutable() {
+    return const_cast<RuntimeUserConfig&>(Get());
+}
+
+inline constexpr std::array<std::string_view, 12> kControllerButtonKeys = {
+    "a", "b", "x", "y", "start", "z", "l", "r", "up", "down", "left", "right",
+};
+
+inline constexpr std::array<std::string_view, 3> kRemoteActionKeys = {"tilt_left", "tilt_right", "shake"};
+
+inline const std::optional<std::string>& RemoteAction(size_t index) {
+    static const std::optional<std::string> empty;
+    return index < Get().remoteActions.size() ? Get().remoteActions[index] : empty;
+}
+
+inline const std::optional<std::string>& ControllerButton(size_t index) {
+    static const std::optional<std::string> empty;
+    return index < Get().controllerButtons.size() ? Get().controllerButtons[index] : empty;
+}
+
+// Update one TOML value without discarding comments, unrelated settings, or
+// user-specific paths. This is used by the in-game F10 settings bar.
+inline bool WriteSetting(std::string_view section, std::string_view key, std::string_view value) {
+    const auto path = ResolveConfigPath();
+    std::ifstream input(path);
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        lines.push_back(std::move(line));
+    }
+
+    const std::string normalizedSection = Trim(section);
+    const std::string normalizedKey = Trim(key);
+    size_t sectionStart = lines.size();
+    size_t sectionEnd = lines.size();
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string trimmed = Trim(RemoveComment(lines[i]));
+        if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
+            const std::string found = Trim(std::string_view(trimmed).substr(1, trimmed.size() - 2));
+            if (sectionStart != lines.size()) {
+                sectionEnd = i;
+                break;
+            }
+            if (found == normalizedSection) {
+                sectionStart = i;
+            }
+        }
+    }
+
+    const std::string replacement = normalizedKey + " = " + std::string(value);
+    if (sectionStart == lines.size()) {
+        if (!lines.empty() && !lines.back().empty()) {
+            lines.emplace_back();
+        }
+        lines.emplace_back("[" + normalizedSection + "]");
+        lines.push_back(replacement);
+    } else {
+        bool replaced = false;
+        for (size_t i = sectionStart + 1; i < sectionEnd; ++i) {
+            const std::string uncommented = Trim(RemoveComment(lines[i]));
+            const size_t equals = uncommented.find('=');
+            if (equals != std::string::npos && Trim(std::string_view(uncommented).substr(0, equals)) == normalizedKey) {
+                lines[i] = replacement;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            // Append after the section's last real line rather than after the blank line that
+            // separates it from the next header: this file is edited by hand and by the host
+            // installer as well, and a key parked below the separator reads as if it belonged to
+            // the next section. The host writer (Launcher/WiiCompiled.Setup/RuntimeConfiguration.cs)
+            // applies exactly this rule.
+            size_t insertAt = sectionEnd;
+            while (insertAt > sectionStart + 1 && Trim(lines[insertAt - 1]).empty()) {
+                --insertAt;
+            }
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insertAt), replacement);
+        }
+    }
+
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        std::cerr << "[runtime-config] Unable to write " << PathToUtf8(path) << std::endl;
+        return false;
+    }
+    for (const auto& outputLine : lines) {
+        output << outputLine << '\n';
+    }
+    return static_cast<bool>(output);
+}
+
+inline std::string FormatString(std::string_view value) {
+    return toml::format(toml::value(std::string(value)));
+}
+
+inline bool SetResolutionMultiplier(float value) {
+    Mutable().resolutionMultiplier = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("video", "resolution_multiplier", formatted.str());
+}
+
+inline bool SetWindowSize(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) {
+        return false;
+    }
+    Mutable().windowWidth = width;
+    Mutable().windowHeight = height;
+    const bool wroteWidth = WriteSetting("video", "window_width", std::to_string(width));
+    const bool wroteHeight = WriteSetting("video", "window_height", std::to_string(height));
+    return wroteWidth && wroteHeight;
+}
+
+inline bool SetWindowPosition(int32_t x, int32_t y) {
+    Mutable().windowPosX = x;
+    Mutable().windowPosY = y;
+    const bool wroteX = WriteSetting("video", "window_x", std::to_string(x));
+    const bool wroteY = WriteSetting("video", "window_y", std::to_string(y));
+    return wroteX && wroteY;
+}
+
+inline bool SetFrameInterpolationFps(uint32_t value) {
+    if (!IsSupportedFrameInterpolationFps(value)) {
+        return false;
+    }
+    Mutable().frameInterpolationFps = value;
+    return WriteSetting("video", "frame_interpolation_fps", std::to_string(value));
+}
+
+inline bool SetMetalFxSpatialUpscaling(bool value) {
+    Mutable().metalFxSpatialUpscaling = value;
+    return WriteSetting("video", "metalfx_spatial_upscaling", value ? "true" : "false");
+}
+
+inline bool SetDisplayMode(std::string value) {
+    if (!IsSupportedDisplayMode(value)) {
+        return false;
+    }
+    Mutable().displayMode = value;
+    return WriteSetting("video", "display_mode", FormatString(value));
+}
+
+inline bool SetSkipUnreadyPipelines(bool value) {
+    Mutable().skipUnreadyPipelines = value;
+    return WriteSetting("video", "skip_unready_pipelines", value ? "true" : "false");
+}
+
+inline bool SetDisableCopyFilter(bool value) {
+    Mutable().disableCopyFilter = value;
+    return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
+}
+
+inline bool SpinningCoins(bool fallback = true) {
+    return Get().spinningCoins.value_or(fallback);
+}
+
+inline bool SetSpinningCoins(bool value) {
+    Mutable().spinningCoins = value;
+    return WriteSetting("video", "spinning_coins", value ? "true" : "false");
+}
+
+// NSMBW: the language the game runs in ("en", "es", "fr" or "it"); read by SCGetLanguage at boot.
+inline std::string Language(std::string fallback = "en") {
+    return Get().language.value_or(std::move(fallback));
+}
+
+// The USA disc's own languages. Any other runs on the English files, with the text a language pack
+// (LanguagePackDir) puts over them.
+inline bool DiscLanguage(const std::string& code) {
+    return code == "en" || code == "es" || code == "fr";
+}
+
+inline std::filesystem::path ResolvedDvdRoot();
+
+// Italian can live in the EU tree of the selected game dump. Keep the user-data path as a fallback
+// for existing installs and for other language packs.
+inline std::filesystem::path LanguagePackDir(const std::string& code) {
+    std::error_code ec;
+    if (code == "it") {
+        const std::filesystem::path gamePack = ResolvedDvdRoot() / "files" / "EU" / "ItaEU";
+        if (std::filesystem::is_directory(gamePack / "Message", ec)) {
+            return gamePack;
+        }
+    }
+
+    // Languages/<code> beside Config.toml, shaped like the disc's files/US/EngUS (Font, Layout,
+    // Message, staffroll), or holding one folder that is. Only files the disc has are used.
+    std::filesystem::path dir = ResolveConfigPath().parent_path() / "Languages" / PathFromUtf8(code);
+    ec.clear();
+    if (!std::filesystem::is_directory(dir / "Message", ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_directory(ec) && std::filesystem::is_directory(entry.path() / "Message", ec)) {
+                return entry.path();
+            }
+        }
+    }
+    return dir;
+}
+
+inline bool LanguagePackInstalled(const std::string& code) {
+    std::error_code ec;
+    return std::filesystem::is_directory(LanguagePackDir(code) / "Message", ec);
+}
+
+inline bool SetLanguage(const std::string& value) {
+    if (!DiscLanguage(value) && value != "it") {
+        return false;
+    }
+    Mutable().language = value;
+    return WriteSetting("game", "language", FormatString(value));
+}
+
+// NSMBW: the Gameplay tab (gameplay_options.cpp applies them).
+inline bool NoTimeLimit() {
+    return Get().noTimeLimit.value_or(false);
+}
+
+inline bool SetNoTimeLimit(bool value) {
+    Mutable().noTimeLimit = value;
+    return WriteSetting("game", "no_time_limit", value ? "true" : "false");
+}
+
+inline bool InfiniteLives() {
+    return Get().infiniteLives.value_or(false);
+}
+
+inline bool SetInfiniteLives(bool value) {
+    Mutable().infiniteLives = value;
+    return WriteSetting("game", "infinite_lives", value ? "true" : "false");
+}
+
+// The Gameplay tab's Power-Up (the list in GameplayOptions); the Fire Flower until one is picked.
+inline uint32_t PowerUp() {
+    return Get().powerUp.value_or(2);
+}
+
+inline bool SetPowerUp(uint32_t value) {
+    Mutable().powerUp = value;
+    return WriteSetting("game", "power_up", std::to_string(value));
+}
+
+inline bool CheatButton() {
+    return Get().cheatButton.value_or(false);
+}
+
+inline bool SetCheatButton(bool value) {
+    Mutable().cheatButton = value;
+    return WriteSetting("game", "cheat_button", value ? "true" : "false");
+}
+
+// P1's character on save file `file` (0-2): 0 Mario, 1 Luigi, 2 Blue Toad, 3 Yellow Toad.
+inline uint32_t FileCharacter(int file) {
+    if (file < 0 || file > 2) {
+        return 0;
+    }
+    return Get().fileCharacters[static_cast<size_t>(file)].value_or(0);
+}
+
+inline bool SetFileCharacter(int file, uint32_t value) {
+    if (file < 0 || file > 2 || value > 3) {
+        return false;
+    }
+    Mutable().fileCharacters[static_cast<size_t>(file)] = value;
+    return WriteSetting("game", "file" + std::to_string(file + 1) + "_character", std::to_string(value));
+}
+
+inline bool FileCheated(int file) {
+    return file >= 0 && file <= 2 && Get().fileCheated[static_cast<size_t>(file)].value_or(false);
+}
+
+inline bool SetFileCheated(int file, bool value) {
+    if (file < 0 || file > 2) {
+        return false;
+    }
+    Mutable().fileCheated[static_cast<size_t>(file)] = value;
+    return WriteSetting("game", "file" + std::to_string(file + 1) + "_cheated", value ? "true" : "false");
+}
+
+inline bool FrameGraph(bool fallback = false) {
+    return Get().frameGraph.value_or(fallback);
+}
+
+inline bool TouchControls(bool fallback = true) {
+    return Get().touchControls.value_or(fallback);
+}
+
+inline uint32_t FrameGraphSize(uint32_t fallback = 50) {
+    return Get().frameGraphSize.value_or(fallback);
+}
+
+inline bool SetFrameGraphSize(uint32_t value) {
+    Mutable().frameGraphSize = value;
+    return WriteSetting("video", "frame_graph_size", std::to_string(value));
+}
+
+inline bool SetFrameGraph(bool value) {
+    Mutable().frameGraph = value;
+    return WriteSetting("video", "frame_graph", value ? "true" : "false");
+}
+
+inline bool VSync(bool fallback = false) {
+    return Get().vsync.value_or(fallback);
+}
+
+inline bool SetVSync(bool value) {
+    Mutable().vsync = value;
+    return WriteSetting("video", "vsync", value ? "true" : "false");
+}
+
+inline bool BatterySaver(bool fallback = false) {
+    return Get().batterySaver.value_or(fallback);
+}
+
+inline bool SetBatterySaver(bool value) {
+    Mutable().batterySaver = value;
+    return WriteSetting("video", "battery_saver", value ? "true" : "false");
+}
+
+inline bool SetShowFps(bool value) {
+    Mutable().showFps = value;
+    return WriteSetting("video", "show_fps", value ? "true" : "false");
+}
+
+inline bool SetDisabledPostProcessingPaths(uint32_t value) {
+    Mutable().disabledPostProcessingPaths = value;
+    std::ostringstream formatted;
+    formatted << "0x" << std::hex << std::uppercase << value;
+    return WriteSetting("video", "disabled_post_processing_paths", formatted.str());
+}
+
+inline bool SetControllerButton(size_t index, std::string value) {
+    if (index >= kControllerButtonKeys.size()) {
+        return false;
+    }
+    Mutable().controllerButtons[index] = value;
+    return WriteSetting("controller", kControllerButtonKeys[index], FormatString(value));
+}
+
+inline bool SetRemoteAction(size_t index, std::string value) {
+    if (index >= kRemoteActionKeys.size()) {
+        return false;
+    }
+    Mutable().remoteActions[index] = value;
+    return WriteSetting("controller", kRemoteActionKeys[index], FormatString(value));
+}
+
+inline std::string ControllerExpression(const std::string& key) {
+    const auto it = Get().controllerExpressions.find(key);
+    return it == Get().controllerExpressions.end() ? std::string() : it->second;
+}
+
+inline bool SetControllerExpression(const std::string& key, const std::string& value) {
+    Mutable().controllerExpressions[key] = value;
+    return WriteSetting("controller", key, FormatString(value));
+}
+
+inline std::string KeyboardBinding(const std::string& key) {
+    const auto it = Get().keyboardBindings.find(key);
+    return it == Get().keyboardBindings.end() ? std::string() : it->second;
+}
+
+inline bool SetKeyboardBinding(const std::string& key, const std::string& value) {
+    Mutable().keyboardBindings[key] = value;
+    return WriteSetting("keyboard", key, FormatString(value));
+}
+
+// [["Left Ctrl", "X"], ["Z", "Mouse L"]] (or [] for none), on one line as WriteSetting needs.
+inline std::string FormatCombos(const std::vector<std::vector<std::string>>& combos) {
+    std::string text = "[";
+    for (size_t i = 0; i < combos.size(); ++i) {
+        text += i == 0 ? "[" : ", [";
+        for (size_t j = 0; j < combos[i].size(); ++j) {
+            text += (j == 0 ? "" : ", ") + FormatString(combos[i][j]);
+        }
+        text += "]";
+    }
+    return text + "]";
+}
+
+// The combinations of an action ("jump"), [keyboard] or [controller] "<action>_combos".
+inline std::vector<std::vector<std::string>> KeyboardCombos(const std::string& action) {
+    const auto it = Get().keyboardCombos.find(action + "_combos");
+    return it == Get().keyboardCombos.end() ? std::vector<std::vector<std::string>>() : it->second;
+}
+
+inline bool SetKeyboardCombos(const std::string& action, const std::vector<std::vector<std::string>>& combos) {
+    Mutable().keyboardCombos[action + "_combos"] = combos;
+    return WriteSetting("keyboard", action + "_combos", FormatCombos(combos));
+}
+
+inline std::vector<std::vector<std::string>> ControllerCombos(const std::string& action) {
+    const auto it = Get().controllerCombos.find(action + "_combos");
+    return it == Get().controllerCombos.end() ? std::vector<std::vector<std::string>>() : it->second;
+}
+
+inline bool SetControllerCombos(const std::string& action, const std::vector<std::vector<std::string>>& combos) {
+    Mutable().controllerCombos[action + "_combos"] = combos;
+    return WriteSetting("controller", action + "_combos", FormatCombos(combos));
+}
+
+inline bool RumbleEnabled(bool fallback = true) {
+    return Get().rumbleEnabled.value_or(fallback);
+}
+
+inline bool SetRumbleEnabled(bool value) {
+    Mutable().rumbleEnabled = value;
+    return WriteSetting("controller", "rumble", value ? "true" : "false");
+}
+
+inline int32_t ButtonLayout(int32_t fallback = 0) {
+    return Get().buttonLayout.value_or(fallback);
+}
+
+inline bool SetButtonLayout(int32_t value) {
+    Mutable().buttonLayout = value;
+    return WriteSetting("controller", "button_layout", std::to_string(value));
+}
+
+inline int32_t NetplayInputDelay(int32_t fallback = 0) {
+    return Get().netplayInputDelay.value_or(fallback);
+}
+
+inline bool SetNetplayInputDelay(int32_t value) {
+    Mutable().netplayInputDelay = value;
+    return WriteSetting("netplay", "input_delay", std::to_string(value));
+}
+
+inline int32_t MuteHotkey(int32_t fallback) {
+    return Get().muteHotkey.value_or(fallback);
+}
+
+inline bool SetMuteHotkey(int32_t value) {
+    Mutable().muteHotkey = value;
+    return WriteSetting("audio", "mute_key", std::to_string(value));
+}
+
+inline bool SetAudioVolume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    Mutable().audioVolume = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("audio", "volume", formatted.str());
+}
+
+inline bool SetMusicVolume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    Mutable().audioMusicVolume = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("audio", "music_volume", formatted.str());
+}
+
+inline bool SetSoundEffectsVolume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    Mutable().audioSoundEffectsVolume = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("audio", "sound_effects_volume", formatted.str());
+}
+
+inline bool SetUiVolume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    Mutable().audioUiVolume = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("audio", "ui_volume", formatted.str());
+}
+
+inline bool SetVoicesVolume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    Mutable().audioVoicesVolume = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("audio", "voices_volume", formatted.str());
+}
+
+inline bool SetAudioMuted(bool value) {
+    Mutable().audioMuted = value;
+    return WriteSetting("audio", "muted", value ? "true" : "false");
+}
+
+inline bool SetAudioMixWorker(bool value) {
+    Mutable().audioMixWorker = value;
+    return WriteSetting("audio", "mix_worker", value ? "true" : "false");
+}
+
+inline bool SetAttenuateMusicWhenMediaPlays(bool value) {
+    Mutable().attenuateMusicWhenMediaPlays = value;
+    return WriteSetting("audio", "attenuate_music_when_media_plays", value ? "true" : "false");
+}
+
+inline bool WidescreenEnabled(bool fallback = false) {
+    return Get().widescreen.value_or(fallback);
+}
+
+inline bool ForceAspect169Enabled(bool fallback = false) {
+    return Get().forceAspect169.value_or(fallback);
+}
+
+// Display aspect (DisplaySettings): 0 original 4:3, 1 16:9, 2 fill the window or screen.
+inline int32_t AspectMode(int32_t fallback) {
+    return Get().aspectMode.value_or(fallback);
+}
+
+inline int32_t GpuCompat() {
+    return Get().gpuCompat.value_or(0);
+}
+
+inline bool SetGpuCompat(int32_t value) {
+    Mutable().gpuCompat = value;
+    return WriteSetting("video", "gpu_compat", std::to_string(value));
+}
+
+inline bool SetAspectMode(int32_t value) {
+    Mutable().aspectMode = value;
+    return WriteSetting("video", "aspect_mode", std::to_string(value));
+}
+
+inline bool SetForceAspect169(bool value) {
+    Mutable().forceAspect169 = value;
+    return WriteSetting("video", "force_16_9", value ? "true" : "false");
+}
+
+inline bool WindowPosition(int32_t& x, int32_t& y) {
+    if (!Get().windowPosX || !Get().windowPosY) {
+        return false;
+    }
+    x = *Get().windowPosX;
+    y = *Get().windowPosY;
+    return true;
+}
+
+inline uint32_t WindowWidth(uint32_t fallback) {
+    return Get().windowWidth.value_or(fallback);
+}
+
+inline uint32_t WindowHeight(uint32_t fallback) {
+    return Get().windowHeight.value_or(fallback);
+}
+
+inline float ResolutionMultiplier(float fallback = 1.0f) {
+    return std::max(0.0f, Get().resolutionMultiplier.value_or(fallback));
+}
+
+inline bool MetalFxSpatialUpscaling(bool fallback = false) {
+    return Get().metalFxSpatialUpscaling.value_or(fallback);
+}
+
+inline float AudioVolume(float fallback = 1.0f) {
+    return std::clamp(Get().audioVolume.value_or(fallback), 0.0f, 1.0f);
+}
+
+inline float MusicVolume(float fallback = 1.0f) {
+    return std::clamp(Get().audioMusicVolume.value_or(fallback), 0.0f, 1.0f);
+}
+
+inline float SoundEffectsVolume(float fallback = 1.0f) {
+    return std::clamp(Get().audioSoundEffectsVolume.value_or(fallback), 0.0f, 1.0f);
+}
+
+inline float UiVolume(float fallback = 1.0f) {
+    return std::clamp(Get().audioUiVolume.value_or(fallback), 0.0f, 1.0f);
+}
+
+inline float VoicesVolume(float fallback = 1.0f) {
+    return std::clamp(Get().audioVoicesVolume.value_or(fallback), 0.0f, 1.0f);
+}
+
+inline bool AudioMuted(bool fallback = false) {
+    return Get().audioMuted.value_or(fallback);
+}
+
+// Off-thread AX/DSP mix. Default on; false restores the fully synchronous mix.
+inline bool AudioMixWorkerEnabled(bool fallback = true) {
+    return Get().audioMixWorker.value_or(fallback);
+}
+
+// Whether background music should duck automatically for other media playback.
+inline bool AttenuateMusicWhenMediaPlays(bool fallback = false) {
+    return Get().attenuateMusicWhenMediaPlays.value_or(fallback);
+}
+
+// Bluetooth Wii Remotes / Wii U Pro Controllers. Read once before SDL's joystick
+// subsystem comes up, so a change only takes effect on the next launch.
+inline bool WiiRemotesEnabled(bool fallback = true) {
+    return Get().wiiRemotes.value_or(fallback);
+}
+
+// Persists the Bluetooth Wii Remote driver switch.
+inline bool SetWiiRemotesEnabled(bool value) {
+    Mutable().wiiRemotes = value;
+    return WriteSetting("controller", "wii_remotes", value ? "true" : "false");
+}
+
+// Whether to keep rescanning Bluetooth while no Wii controller is connected.
+inline bool WiiContinuousScanEnabled(bool fallback = false) {
+    return Get().wiiContinuousScan.value_or(fallback);
+}
+
+// Persists the continuous scanning switch.
+inline bool SetWiiContinuousScanEnabled(bool value) {
+    Mutable().wiiContinuousScan = value;
+    return WriteSetting("controller", "wii_continuous_scan", value ? "true" : "false");
+}
+
+// Bluetooth passthrough: "auto", "on" or "off" (bt_passthrough.h). Takes effect on the next start. Off by
+// default for 0.5.0: nobody has tried it with a real adapter yet, and with it on, the keyboard and
+// controllers don't drive the game.
+inline std::string BluetoothPassthroughMode() {
+    return Get().bluetoothPassthrough.value_or("off");
+}
+
+// Persists the Bluetooth passthrough setting ("auto", "on" or "off").
+inline bool SetBluetoothPassthroughMode(const std::string& value) {
+    if (value != "auto" && value != "on" && value != "off") {
+        return false;
+    }
+    Mutable().bluetoothPassthrough = value;
+    return WriteSetting("input", "bluetooth_passthrough", FormatString(value));
+}
+
+// Wii Remote accelerometer zero-point correction (g, SDL sensor frame); all zero
+// when the remote has not been calibrated.
+inline std::array<double, 3> WiiAccelOffset() {
+    const RuntimeUserConfig& config = Get();
+    return {config.wiiAccelOffsetX.value_or(0.0), config.wiiAccelOffsetY.value_or(0.0),
+            config.wiiAccelOffsetZ.value_or(0.0)};
+}
+
+// Whether to write the per-frame accelerometer trace (off unless asked for).
+inline bool WiiAccelTraceEnabled(bool fallback = false) {
+    return Get().wiiAccelTrace.value_or(fallback);
+}
+
+// True while a non-zero correction is stored ("Clear calibration" writes zeros).
+inline bool HasWiiAccelOffset() {
+    const std::array<double, 3> offset = WiiAccelOffset();
+    return offset[0] != 0.0 || offset[1] != 0.0 || offset[2] != 0.0;
+}
+
+// Persists the accelerometer correction measured by the overlay's calibration.
+inline bool SetWiiAccelOffset(const std::array<double, 3>& offset) {
+    Mutable().wiiAccelOffsetX = offset[0];
+    Mutable().wiiAccelOffsetY = offset[1];
+    Mutable().wiiAccelOffsetZ = offset[2];
+    bool ok = true;
+    const char* keys[3] = {"wii_accel_offset_x", "wii_accel_offset_y", "wii_accel_offset_z"};
+    for (size_t i = 0; i < 3; ++i) {
+        // Always a float literal, so a whole-number offset does not come back as a TOML integer.
+        std::ostringstream formatted;
+        formatted << std::fixed << std::setprecision(4) << offset[i];
+        ok = WriteSetting("controller", keys[i], formatted.str()) && ok;
+    }
+    return ok;
+}
+
+// Target frame rate for frame interpolation, or 0 to disable it.
+inline uint32_t FrameInterpolationFps(uint32_t fallback = 0) {
+    return Get().frameInterpolationFps.value_or(fallback);
+}
+
+// Whether to skip draws whose graphics pipeline has not finished compiling yet.
+inline bool SkipUnreadyPipelines(bool fallback = true) {
+    return Get().skipUnreadyPipelines.value_or(fallback);
+}
+
+inline bool DisableCopyFilter(bool fallback = true) {
+    return Get().disableCopyFilter.value_or(fallback);
+}
+
+inline bool ShowFps(bool fallback = true) {
+    return Get().showFps.value_or(fallback);
+}
+
+inline bool TextureReplacements(bool fallback = false) {
+    return Get().textureReplacements.value_or(fallback);
+}
+
+// The Mods tab's HD Texture Pack On / Off (aurora_set_texture_replacements makes it take effect at once).
+inline bool SetTextureReplacements(bool value) {
+    Mutable().textureReplacements = value;
+    return WriteSetting("video", "texture_replacements", value ? "true" : "false");
+}
+
+// Dumping only produces the names a replacement would need, so main.cpp
+// gates it on TextureReplacements() as well.
+inline bool TextureDumps(bool fallback = false) {
+    return Get().textureDumps.value_or(fallback);
+}
+
+inline uint32_t DisabledPostProcessingPaths(uint32_t fallback = 0) {
+    return Get().disabledPostProcessingPaths.value_or(fallback) & 0x10u;
+}
+
+inline std::string GraphicsApi(std::string fallback = "auto") {
+    return Get().graphicsApi.value_or(std::move(fallback));
+}
+
+// Takes effect at the next start: the renderer is chosen once, before the window exists.
+inline bool SetGraphicsApi(const std::string& value) {
+    if (!IsSupportedGraphicsApi(value)) {
+        return false;
+    }
+    Mutable().graphicsApi = value;
+    return WriteSetting("video", "graphics_api", FormatString(value));
+}
+
+inline std::string DisplayMode(std::string fallback = "windowed") {
+    return Get().displayMode.value_or(std::move(fallback));
+}
+
+inline bool NetworkEnabled(bool fallback = true) {
+    return Get().networkEnabled.value_or(fallback);
+}
+
+inline std::string NandRoot(std::string fallback = "") {
+    return Get().nandRoot.value_or(std::move(fallback));
+}
+
+inline std::string DvdRoot(std::string fallback = "") {
+    return Get().dvdRoot.value_or(std::move(fallback));
+}
+
+// The one resolver for configured paths. A relative value means the same thing
+// everywhere it can be configured: relative to the config file that named it,
+// never to the process working directory (docs/WHEELWIZARD_CONTRACT.md).
+inline std::filesystem::path ResolveRelativeTo(const std::filesystem::path& base,
+                                               const std::string& value) {
+    std::filesystem::path path = PathFromUtf8(value);
+    if (path.is_relative()) {
+        path = base / path;
+    }
+    return path.lexically_normal();
+}
+
+inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
+    return ResolveRelativeTo(ResolveConfigPath().parent_path(), value);
+}
+
+// The extracted DATA directory. Empty when nothing is configured.
+inline std::filesystem::path ResolvedDvdRoot() {
+    const std::string configured = DvdRoot();
+    return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
+}
+
+// NSMBW: a game folder for this run only, not saved (a "game" folder beside the program, so each
+// install plays its own game while they all share Documents\MarioWiiSaveData).
+inline void UseDvdRootForThisRun(const std::filesystem::path& path) {
+    Mutable().dvdRoot = PathToUtf8(path);
+}
+
+// The game folder the player picked at first start (GameFolder::EnsureConfigured).
+inline bool SetDvdRoot(const std::filesystem::path& path) {
+    const std::string value = PathToUtf8(path);
+    Mutable().dvdRoot = value;
+    return WriteSetting("paths", "dvd_root", FormatString(value));
+}
+
+/// The canonical Retro Rewind installation the frontend owns, or "" when none is recorded.
+inline std::string RetroRewindRoot(std::string fallback = "") {
+    return Get().retroRewindRoot.value_or(std::move(fallback));
+}
+
+inline bool DiscordPresenceEnabled(bool fallback = true) {
+    return Get().discordPresenceEnabled.value_or(fallback);
+}
+
+inline std::string DiscordClientId(std::string fallback = "1543984562369990706") {
+    return Get().discordClientId.value_or(std::move(fallback));
+}
+
+inline const std::vector<std::string>& OverlayRoots() {
+    return Get().overlayRoots;
+}
+
+inline void LogLoadedConfig() {
+    static const bool logged = [] {
+        const auto& config = Get();
+        const auto configPath = ResolveConfigPath();
+        std::cout << "[runtime-config] " << PathToUtf8(configPath);
+        if (!std::filesystem::exists(configPath)) {
+            std::cout << " not found; using built-in defaults";
+        } else {
+            std::cout << " loaded";
+            if (config.widescreen) {
+                std::cout << " widescreen=" << (*config.widescreen ? "true" : "false");
+            }
+            if (config.windowWidth || config.windowHeight) {
+                std::cout << " window=" << config.windowWidth.value_or(0) << "x"
+                          << config.windowHeight.value_or(0);
+            }
+            if (config.resolutionMultiplier) {
+                std::cout << " resolution_multiplier=" << *config.resolutionMultiplier;
+            }
+            if (config.dvdRoot) {
+                std::cout << " dvd_root=" << *config.dvdRoot;
+            }
+            if (config.graphicsApi) {
+                std::cout << " graphics_api=" << *config.graphicsApi;
+            }
+            if (config.frameInterpolationFps) {
+                std::cout << " frame_interpolation_fps=" << *config.frameInterpolationFps;
+            }
+            if (config.skipUnreadyPipelines) {
+                std::cout << " skip_unready_pipelines=" << (*config.skipUnreadyPipelines ? "true" : "false");
+            }
+            if (config.disableCopyFilter) {
+                std::cout << " disable_copy_filter=" << (*config.disableCopyFilter ? "true" : "false");
+            }
+            if (config.showFps) {
+                std::cout << " show_fps=" << (*config.showFps ? "true" : "false");
+            }
+            if (config.textureReplacements) {
+                std::cout << " texture_replacements=" << (*config.textureReplacements ? "true" : "false");
+            }
+            if (config.textureDumps) {
+                std::cout << " texture_dumps=" << (*config.textureDumps ? "true" : "false");
+            }
+            if (config.audioVolume) {
+                std::cout << " audio_volume=" << *config.audioVolume;
+            }
+            if (config.audioMuted) {
+                std::cout << " audio_muted=" << (*config.audioMuted ? "true" : "false");
+            }
+            if (config.networkEnabled) {
+                std::cout << " network_enabled=" << (*config.networkEnabled ? "true" : "false");
+            }
+            if (config.discordPresenceEnabled) {
+                std::cout << " discord_enabled=" << (*config.discordPresenceEnabled ? "true" : "false");
+            }
+            if (config.nandRoot) {
+                std::cout << " nand_root=" << *config.nandRoot;
+            }
+            if (config.retroRewindRoot) {
+                std::cout << " retro_rewind_root=" << *config.retroRewindRoot;
+            }
+        }
+        std::cout << std::endl;
+        return true;
+    }();
+    (void)logged;
+}
+
+} // namespace RuntimeConfigFile
