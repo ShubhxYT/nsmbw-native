@@ -202,3 +202,25 @@ Current stop: `NANDOpen '/shared2/sys/SYSCONF'` fails. `SeedMissingBootstrapFile
 `wii_bootstrap` payload beside the executable, which Horizon has no notion of, so the NAND is never
 seeded and the guest hits its "disc could not be read" screen. Next: teach the seeding (and
 `RuntimeNandSettings::Ensure`) to work from the SD card, or ship a prepared NAND.
+
+## Uncached MEM1/MEM2 mirrors on Horizon
+
+`OSInit` reads the running IOS version through the **0xC0000000 MEM1 uncached alias**. The arena is a
+single 512 MiB block (0x80000000..0x9FFFFFFF), so that alias — 1 GiB higher — was outside it, the read
+returned nothing, and the SDK aborted with:
+
+```
+[OSReport] OS ERROR: This firmware is an improper version for this SDK.
+[os] OS::Fatal called ...  guest=0x801AF5D0<OSFatal>
+```
+
+`HostPointer` now folds 0xC0000000..0xDFFFFFFF onto the cached windows (subtract 0x40000000), which is
+the same physical memory, so SDK reads through the alias land on real storage. Verified:
+
+```
+GF: OUTSIDE ARENA guest=c0000000 ...   (before)
+[OSReport] << RVL_SDK - SC release build ... >>
+[OSReport] << NW4R - EF final build ... >>   (after — OSInit passes, NW4R initialises)
+```
+
+Next blocker after that: an unhandled C++ exception during NW4R initialisation.

@@ -732,6 +732,15 @@ uint8_t* Base() {
 uint8_t* HostPointer(uint32_t guestAddress) {
     if (!g_initialized) return nullptr;
 #if defined(__SWITCH__)
+    // The arena is a single 512 MiB block, so the uncached mirrors cannot be separate mappings.
+    // 0xC0000000 (MEM1 uncached) and 0xD0000000 (MEM2 uncached) are the same physical memory as
+    // their cached windows 1 GiB lower; fold them so SDK reads through the alias (OSInit's IOS
+    // version check among them) land on real storage.
+    if (guestAddress >= 0xC0000000u && guestAddress < 0xE0000000u) {
+        guestAddress -= 0x40000000u;
+    }
+#endif
+#if defined(__SWITCH__)
     // The arena covers guest 0x80000000..0x9FFFFFFF only; g_base sits 2 GiB before it, so an access
     // below 0x80000000 computes a pointer that is not mapped and faults instead of being reported.
     // Horizon cannot reserve 2 GiB of guard space for that range, so such accesses land in a small
@@ -748,6 +757,29 @@ uint8_t* HostPointer(uint32_t guestAddress) {
         }
         static uint8_t nullPage[0x10000];
         return nullPage + (guestAddress & 0xFFFFu);
+    }
+#endif
+#if defined(__SWITCH__)
+    // Anything outside the arena is not backed: the arena is one 512 MiB block covering
+    // 0x80000000..0x9FFFFFFF, so the 0xC0000000 MEM1 alias and other mirrors fall outside it.
+    {
+        static unsigned long long arenaBegin = 0;
+        static unsigned long long arenaEnd = 0;
+        if (arenaBegin == 0) {
+            arenaBegin = reinterpret_cast<unsigned long long>(g_base) + 0x80000000ull;
+            arenaEnd = arenaBegin + 0x20000000ull;  // the 512 MiB Switch arena
+        }
+        const auto host = reinterpret_cast<unsigned long long>(g_base) + guestAddress;
+        if (guestAddress >= 0x80000000u && (host < arenaBegin || host >= arenaEnd)) {
+            static int reported = 0;
+            if (reported < 8) {
+                ++reported;
+                char line[96];
+                std::snprintf(line, sizeof line, "GF: OUTSIDE ARENA guest=%08x host=%llx",
+                              guestAddress, host);
+                switch_trace_mark(line);
+            }
+        }
     }
 #endif
     for (const auto& region : MappedRegions()) {
