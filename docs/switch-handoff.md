@@ -185,6 +185,47 @@ libstdc++, 24 in libstdc++fs, **9 in libc**, 1 in libsysbase, 0 in libm/libgcc �
 libc for the blanket rewrite. With the targeted version the probes match stock exactly *and* the
 link still reports `RODATA RELOCATIONS: 0 of 38921`.
 
+## 5c. Better than re-PIC-ing: put `.rodata` in the writable segment
+
+The library surgery in §5.3 is no longer needed. `switch.ld` assigns output sections to explicit
+program headers:
+
+```
+PHDRS
+{
+    code   PT_LOAD FLAGS(5);   /* RX */
+    rodata PT_LOAD FLAGS(4);   /* R  */
+    data   PT_LOAD FLAGS(6);   /* RW */
+}
+```
+
+and `.rodata` is emitted `:rodata`. If it is emitted `:data` instead, every one of the 1,810
+relocations that used to land in a read-only page becomes a normal writable store, and devkitPro's
+prebuilt libraries link **unmodified** — which also removes the newlib/locale breakage in §5b(b)
+entirely.
+
+`switch/make-rw-ldscript.py` generates `switch-rw.ld` and a matching `switch-rw.specs`. Two details:
+
+* The `.rodata` block must be **moved to the end of the read-only group**, not retargeted in place:
+  `.tls.align`, `.eh_frame`, `.gnu.version*` and `.note.gnu.build-id` follow it and stay `:rodata`,
+  and a `:rodata` section placed after a `:data` one produces overlapping LMAs.
+* The `-T` has to come from the **specs file**. Passing a second `-T` on the command line leaves both
+  scripts in effect, which resets the location counter and fails with
+  `section .tls.align LMA [0,7] overlaps section .text LMA`.
+
+The read-only segment keeps the dynamic tables and the unwind tables, so elf2nso still sees three
+loadable segments. Verified with stock libraries: `.rodata` lands at `0xef000`, exactly the start of
+the RW segment, and a 300 KB probe runs `RuntimeConfigFile::Get()` end to end
+(`CFG opened → CFG parsed → CFG loaded → done`).
+
+Build with:
+
+```
+SPECS=/src/switch/switch-rw.specs \
+RUNTIME_LIBS="-L/opt/devkitpro/devkitA64/aarch64-none-elf/lib -lstdc++ -lc -lm -lgcc -lsysbase" \
+./switch/rebuild.sh --pack
+```
+
 ## 6. Current build pipeline
 
 Order matters; scripts are in `switch/`:
