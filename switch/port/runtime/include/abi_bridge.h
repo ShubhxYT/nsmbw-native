@@ -665,20 +665,11 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx) {
         ReportMissingCpuTarget(target, cpu);
     }
     ApplyRuntimeCallOptions(target, cpu);
-    // Entry/exit trace: the last "II>" without a matching "II<" is the guest function that never
-    // returned, which is how the stall inside the first DOL constructor is being located.
-    {
-        char line[48];
-        std::snprintf(line, sizeof line, "II> %08x", target);
-        switch_trace_mark(line);
-    }
     if (const auto* slot = TranslatedFunctionRegistry::FindFastRaw(target)) {
         DispatchFastRawSlot(*slot, cpu);
-        switch_trace_mark("II< fast");
         return;
     }
     if (TryDispatchResolvedCpuTarget(TranslatedFunctionRegistry::FindByAddressPtr(target), cpu)) {
-        switch_trace_mark("II< resolved");
         return;
     }
     ReportMissingCpuTarget(target, cpu);

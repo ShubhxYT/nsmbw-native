@@ -1,24 +1,33 @@
 {
   "name": "nsmbw",
-  "title_id": "0x01004E5300000000",
+  "title_id": "0x01004E53A1B50000",
   "title_id_range_min": "0x0100000000000000",
   "title_id_range_max": "0x01ffffffffffffff",
   "main_thread_stack_size": "0x800000",
   "main_thread_priority": 44,
   "default_cpu_id": 0,
-  "process_category": 1,
-  "pool_partition": 1,
+  "process_category": 0,
+  "pool_partition": 0,
   "is_64_bit": true,
   "address_space_type": 1,
   "is_retail": true,
   "filesystem_access": {
     "permissions": "0xFFFFFFFFFFFFFFFF"
   },
-  "service_host": [
-    "*"
-  ],
+  "service_host": [],
   "service_access": [
-    "*"
+    "fsp-srv",
+    "set:sys",
+    "time:u",
+    "spl:",
+    "audren:u",
+    "nifm:u",
+    "apm",
+    "appletOE",
+    "vi:u",
+    "nvdrv",
+    "nvdrv:a",
+    "hid"
   ],
   "kernel_capabilities": [
     {
@@ -155,5 +164,8 @@
       "type": "debug_flags",
       "value": {}
     }
-  ]
+  ],
+  "debug_flags": {
+    "allow_debug": true
+  }
 }

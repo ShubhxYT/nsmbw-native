@@ -1,0 +1,48 @@
+--- a/src/dawn/native/opengl/QueueGL.cpp
++++ b/src/dawn/native/opengl/QueueGL.cpp
+@@ -77,11 +77,8 @@
+         mEGLSyncType = EGL_SYNC_REUSABLE_KHR;
+     } else {
+ #if defined(__SWITCH__)
+-        // NSMBW (Switch port): Mesa's Switch EGL advertises none of the fence-sync extensions, and
+-        // DAWN_UNREACHABLE() is undefined behaviour - it hung device creation rather than reporting
+-        // anything. Fall back to EGL_SYNC_FENCE so the fence path can report a real error if a
+-        // submission ever genuinely needs one.
+-        mEGLSyncType = EGL_SYNC_FENCE;
++        // This EGL implementation has no fence entry points. Finish GL work synchronously.
++        mEGLSyncType = EGL_NONE;
+ #else
+         DAWN_UNREACHABLE();
+ #endif
+@@ -253,6 +250,14 @@
+     Device* device = ToBackend(GetDevice());
+     return device->EnqueueAndFlushGL(
+         SubmitMode::Passive, [&](const OpenGLFunctions& gl) -> MaybeError {
++#if defined(__SWITCH__)
++            if (mEGLSyncType == EGL_NONE) {
++                DAWN_GL_TRY(gl, Finish());
++                IncrementLastSubmittedCommandSerial();
++                mHasPendingUnsignaledCommands = false;
++                return {};
++            }
++#endif
+             Ref<WrappedEGLSync> sync;
+             DisplayEGL* display = ToBackend(device->GetPhysicalDevice())->GetDisplay();
+             DAWN_TRY_ASSIGN(sync, WrappedEGLSync::Create(display, gl, mEGLSyncType, {}));
+@@ -341,7 +346,15 @@
+     Device* device = ToBackend(GetDevice());
+     // This function is called after all dependent GL commands have been flushed in
+     // Queue::SubmitImpl(), it's safe to use ExecuteGL().
+-    return device->ExecuteGL(SubmitMode::Passive, [&](const OpenGLFunctions& gl) -> auto {
++    return device->ExecuteGL(SubmitMode::Passive,
++                             [&](const OpenGLFunctions& gl) -> ResultOrError<ExecutionSerial> {
++#if defined(__SWITCH__)
++        if (mEGLSyncType == EGL_NONE) {
++            DAWN_TRY(CheckGraphicsResetStatus(gl, "Completing a queue serial"));
++            // SubmitFenceSync advances this serial only after glFinish.
++            return GetLastSubmittedCommandSerial();
++        }
++#endif
+         return mFencesInFlight.Use([&](auto fencesInFlight) -> ResultOrError<ExecutionSerial> {
+             ExecutionSerial fenceSerial = GetCompletedCommandSerial();
+             while (!fencesInFlight->empty()) {

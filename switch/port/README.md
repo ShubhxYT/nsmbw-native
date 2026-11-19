@@ -16,9 +16,10 @@ Everything under `switch/` itself is already the current version.
 
 Real port bug, not instrumentation. `CreateSharedMemory()` returns -1 under `__SWITCH__` ("no
 shared-memory objects on Horizon; the checked arena path does not need them"), but `Initialize()`
-still took the shared section/`memfd_create`/`mmap` path and threw at that -1. Horizon now records
-one `MappedRegion` per request straight from the arena that `EnsureReservation()` already allocated
-(`g_base + region.base` is the host view) and returns before the section machinery.
+still took the shared section/`memfd_create`/`mmap` path and threw at that -1. Horizon uses the
+arena that `EnsureReservation()` allocated. The physical and uncached MEM1/MEM2 ranges point to
+the same bytes as the cached ranges, and the locked cache has a separate allocation. Physical GX
+texture addresses now resolve to their real backing storage. Unmapped addresses return null.
 
 ### `runtime/src/main.cpp` — `argc`
 
@@ -27,14 +28,26 @@ libnx reports `argc == 0` for a title launched from the home menu, which tripped
 check is skipped: Horizon hands over launch parameters from the title metadata, not command-line
 options, and every setting comes from `Config.toml` anyway.
 
+### `runtime/src/hle/storage/dvd.cpp` — SD card disc indexing
+
+On Horizon, `std::filesystem::relative` tries to canonicalize paths beginning with `sdmc:`,
+and the disc index stays empty. Directory iterator entries already descend from the scan root, so
+the Switch path uses `lexically_relative`. The Ryujinx scan then indexed 1,189 disc files.
+
+### `runtime/src/hle/storage/nand_*.{cpp,h}` — Wii save writes on the SD card
+
+`NANDOpen` and `NANDSafeOpen` use a shared byte-copy routine on Horizon. The standard library copy
+failed on the SD mount with `Function not implemented`. To publish a flushed scratch file, move
+the original to a sibling `.nandsafe.bak` first. Horizon's rename requires a free destination name.
+The next access restores that backup if the target is missing or removes it if the completed target
+is already present.
+
 ### Temporary trace instrumentation
 
 `switch_trace_mark()` calls in `RuntimeMain` (`main.cpp`), `SystemBridge::Initialize`
 (`system_bridge.cpp`), `Memory::Init` (`memory.cpp`), `GuestFlat::Initialize`
-(`guest_flat_memory.cpp`) and `RuntimeConfigFile::Get`/`LoadConfigFile` (`runtime_config.h`), plus the
-`log_channel.cpp` init-array trampoline. These write to `sdmc:/switch/nsmbw/init.log` one line per
-step and are what located every blocker in §5b/§5c of the handoff doc. Remove them once the port is
-stable; they cost a file open/close per line.
+(`guest_flat_memory.cpp`) and `RuntimeConfigFile::LoadConfigFile` (`runtime_config.h`) write startup
+milestones to `sdmc:/switch/nsmbw/init.log`.
 
 ### `runtime/include/runtime_config.h`
 
@@ -66,10 +79,8 @@ BSS@SB:      00000000 00000001 00000001 00000000     +0x40 and +0xC0 became 1
 REG: vec=0xe8b70c0 data=0x1 size=5270498306927591953 cap=0
 ```
 
-RESOLVED — see the TLS aliasing section below. The init-array trampoline was ruled out by disabling it.
-
-Next step: re-enable the trampoline (`install_init_trace()` in `log_channel.cpp`) and have it record
-the word at `__bss_start__ + 0xC0` after every constructor, to name the one that writes it.
+The TLS aliasing section below records the resolution. The constructor trace used during that
+investigation was later removed after it stalled startup on the physical Switch.
 
 ## RESOLVED (2026-11-19): `.bss` corruption was TLS aliasing the globals
 

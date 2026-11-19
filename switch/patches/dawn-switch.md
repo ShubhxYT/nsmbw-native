@@ -1,6 +1,6 @@
 # Dawn edits required by the Switch port
 
-`/tmp/deps/dawn-src` is a scratch tree; these three edits must be reapplied whenever Dawn is rebuilt.
+`/tmp/deps/dawn-src` is a scratch tree; these edits must be reapplied whenever Dawn is rebuilt.
 Each was found by reading Aurora's `[aurora::gpu]` log lines in `boot.log`.
 
 Apply them with `switch/rebuild-dawn-object.py`, which recompiles one translation unit using Dawn's
@@ -56,9 +56,23 @@ by a comment). Without this, adapter discovery never succeeds.
 `Queue::Queue` picks a fence type from the EGL extensions and ends in `DAWN_UNREACHABLE()` when none
 is advertised. Relaxing patch 2 leaves exactly that path reachable, and `DAWN_UNREACHABLE()` is
 undefined behaviour: it **hung device creation silently** rather than reporting anything, which cost
-several cycles to find. Under `__SWITCH__` fall back to `EGL_SYNC_FENCE`.
+several cycles to find. Set `mEGLSyncType = EGL_NONE` under `__SWITCH__` to let the device initialise.
 
-This is the patch that lets `aurora_initialize()` return.
+The first submitted frame exposed a second problem: this EGL implementation has no usable
+`eglCreateSync` entry point. Calling the earlier `EGL_SYNC_FENCE` fallback jumped through a null
+function pointer. Apply [`dawn-switch-fence-fallback.patch`](dawn-switch-fence-fallback.patch)
+after the earlier edits. It calls `glFinish` on submission and marks the completed serial
+synchronously. This is correct but can reduce frame rate on hardware.
+
+## 5. `src/dawn/native/opengl/SwapChainEGL.cpp` — use the native window dimensions
+
+Apply [`dawn-switch-present.patch`](dawn-switch-present.patch). Mesa allocates its buffers using
+the native window dimensions, but its EGL surface reported 0×0 in Ryujinx. Dawn now uses the
+`NWindow` dimensions when the EGL query returns zero. The patch also checks `eglSwapBuffers` and
+logs its first success. The startup overlay was visible at 1280×720 after this change.
+
+The linked [devkitPro Mesa patch](https://github.com/devkitPro/pacman-packages/blob/master/switch/mesa/switch-mesa-20.1.0-5.patch)
+shows how the backend sizes its native buffers.
 
 ## Link line
 
@@ -67,10 +81,10 @@ winsys and `fatalThrow` from libnx. Append both, because `-lnx` is scanned befor
 satisfy it there:
 
 ```
-RUNTIME_LIBS="... -lsysbase -ldrm_nouveau -lnx"
+-lnx -lEGL -lGLESv2 -lglapi -lstdc++ -lc -lm -lgcc -lsysbase -ldrm_nouveau -lnx
 ```
 
-## Where it stands
+## Adapter and startup history
 
 With all of the above:
 
@@ -82,8 +96,7 @@ With all of the above:
 [aurora::gpu] Using limits: maxTextureDimension2D: 16384 ...
 ```
 
-The adapter is found and device creation begins, then stalls after printing the device limits, with
-no error — `aurora_initialize()` never returns. That is the next target.
+Before the queue fix, device creation stalled after printing the limits.
 
 ## Result
 
@@ -99,7 +112,7 @@ RM: updater
 RM: loading screen
 ```
 
-Aurora fully initialises, and startup now stops later, at guest entry resolution:
+After Aurora initialised, an older build stopped at guest entry resolution:
 
 ```
 REG: frozen lookup 80004050

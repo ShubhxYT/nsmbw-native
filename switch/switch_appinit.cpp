@@ -18,6 +18,87 @@ extern "C" int g_switchTlsResult = -1;
 extern "C" uint64_t g_switchTlsDelta = 0;
 extern "C" thread_local uint64_t g_switchTlsAnchor = kSwitchTlsSentinel;
 
+namespace {
+
+ViDisplay mainDisplay{};
+ViLayer mainLayer{};
+NWindow mainWindow{};
+bool viReady = false;
+bool displayOpen = false;
+bool layerOpen = false;
+
+void logWindowInit(const char* step, Result result) {
+    char line[96];
+    const int size = std::snprintf(line, sizeof(line), "Window init: %s result=0x%08x\n", step,
+                                   static_cast<unsigned>(result));
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        return;
+    }
+    const int fd = open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        (void)!write(fd, line, static_cast<size_t>(size));
+        close(fd);
+    }
+}
+
+void closeMainWindow() {
+    nwindowClose(&mainWindow);
+    if (layerOpen) {
+        viCloseLayer(&mainLayer);
+        layerOpen = false;
+    }
+    if (displayOpen) {
+        viCloseDisplay(&mainDisplay);
+        displayOpen = false;
+    }
+    if (viReady) {
+        viExit();
+        viReady = false;
+    }
+}
+
+void openMainWindow() {
+    // The __appInit override replaces libnx's default window setup.
+    Result result = viInitialize(ViServiceType_Application);
+    logWindowInit("viInitialize", result);
+    if (R_FAILED(result)) {
+        return;
+    }
+    viReady = true;
+
+    result = viOpenDefaultDisplay(&mainDisplay);
+    logWindowInit("viOpenDefaultDisplay", result);
+    if (R_FAILED(result)) {
+        closeMainWindow();
+        return;
+    }
+    displayOpen = true;
+
+    result = viCreateLayer(&mainDisplay, &mainLayer);
+    logWindowInit("viCreateLayer", result);
+    if (R_FAILED(result)) {
+        closeMainWindow();
+        return;
+    }
+    layerOpen = true;
+
+    result = nwindowCreateFromLayer(&mainWindow, &mainLayer);
+    logWindowInit("nwindowCreateFromLayer", result);
+    if (R_FAILED(result)) {
+        closeMainWindow();
+    }
+}
+
+} // namespace
+
+extern "C" NWindow* switchGetMainWindow() {
+    if (nwindowIsValid(&mainWindow)) {
+        return &mainWindow;
+    }
+    NWindow* fallback = nwindowGetDefault();
+    return nwindowIsValid(fallback) ? fallback : nullptr;
+}
+
 extern "C" void __appInit(void) {
     // First: C++ thread_local is unusable until tpidr_el0 points at the TLS block. Nothing in libnx
     // sets it (libnx reads tpidrro_el0, the IPC buffer), so any thread_local - toml11's parser spec,
@@ -33,7 +114,8 @@ extern "C" void __appInit(void) {
     }
 
     // Applet state, so the system knows the process is a running application (and so nwindow works).
-    appletInitialize();
+    logWindowInit("appletInitialize", appletInitialize());
+    openMainWindow();
 
     // Input. Denied by some NPDMs; the game still renders without a controller.
     // No stdio here: this runs inside crt0, before libc's streams exist. Touching stderr aborts.
@@ -67,6 +149,7 @@ extern "C" void __appInit(void) {
 extern "C" void __appExit(void) {
     timeExit();
     hidExit();
+    closeMainWindow();
     appletExit();
     fsdevUnmountAll();
     fsExit();

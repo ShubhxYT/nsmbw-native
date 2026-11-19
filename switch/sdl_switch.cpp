@@ -15,6 +15,8 @@
 
 #include <switch.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
@@ -27,6 +29,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+extern "C" NWindow* switchGetMainWindow();
 
 // ---------------------------------------------------------------------------------------------
 // Global state
@@ -42,7 +46,8 @@ std::string g_error;
 std::mutex g_eventMutex;
 std::deque<SDL_Event> g_events;
 std::vector<SDL_EventFilter> g_eventFilters;
-std::atomic<bool> g_padInitialized{false};
+std::mutex g_padMutex;
+std::once_flag g_padInit;
 PadState g_pad;
 uint64_t g_startTicks = 0;
 uint64_t g_eventWatchUserId = 0;
@@ -50,7 +55,9 @@ uint64_t g_eventWatchUserId = 0;
 // The single virtual gamepad. libnx exposes one handheld/controller pair through PadState; the rest
 // of the console's controllers would each need their own PadState, which the port adds later.
 constexpr SDL_JoystickID kGamepadId = 1;
-uint8_t g_buttons = 0; // previous frame, for edge detection
+bool g_padConnected = false;
+uint32_t g_buttons = 0;
+std::array<int16_t, SDL_GAMEPAD_AXIS_COUNT> g_axes{};
 
 void set_error(const char* message) {
   g_error = message ? message : "";
@@ -66,15 +73,6 @@ uint64_t now_ns() {
 void push_event(const SDL_Event& event) {
   std::lock_guard lock(g_eventMutex);
   g_events.push_back(event);
-}
-
-void pad_init() {
-  if (g_padInitialized.exchange(true)) {
-    return;
-  }
-  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-  padInitializeDefault(&g_pad);
-  hidInitializeTouchScreen();
 }
 
 // libnx button bits -> SDL gamepad buttons.
@@ -100,13 +98,11 @@ constexpr ButtonMap kButtonMap[] = {
     {HidNpadButton_Right, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
 };
 
-uint8_t read_buttons() {
-  padUpdate(&g_pad);
-  const uint64_t held = padGetButtons(&g_pad);
-  uint8_t mask = 0;
+uint32_t map_buttons(uint64_t held) {
+  uint32_t mask = 0;
   for (const auto& entry : kButtonMap) {
     if ((held & entry.hid) != 0) {
-      mask |= static_cast<uint8_t>(1u << entry.button);
+      mask |= 1u << entry.button;
     }
   }
   return mask;
@@ -116,7 +112,7 @@ int16_t axis_from_stick(int32_t value, int32_t deadzone) {
   if (value > -deadzone && value < deadzone) {
     return 0;
   }
-  return static_cast<int16_t>(value);
+  return static_cast<int16_t>(std::clamp(value, -32767, 32767));
 }
 
 } // namespace
@@ -243,7 +239,13 @@ bool SDL_InitSubSystem(uint32_t flags) {
 
 void SDL_QuitSubSystem(uint32_t flags) { (void)flags; }
 
-void SDL_Quit(void) { g_initialized.store(false); }
+void SDL_Quit(void) {
+  g_initialized.store(false);
+  std::lock_guard lock(g_padMutex);
+  g_padConnected = false;
+  g_buttons = 0;
+  g_axes.fill(0);
+}
 
 SDL_InitFlags SDL_WasInit(SDL_InitFlags flags) {
   (void)flags;
@@ -445,7 +447,7 @@ struct SDL_Window {
   std::string title;
   int width = static_cast<int>(kWindowWidth);
   int height = static_cast<int>(kWindowHeight);
-  uint32_t flags = 0;
+  std::atomic<SDL_WindowFlags> flags{0};
   SDL_PropertiesID properties = 0;
   SDL_DisplayID display = 1;
   NWindow* native = nullptr;
@@ -461,18 +463,19 @@ SDL_Window* SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
   }
   window->width = static_cast<int>(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, kWindowWidth));
   window->height = static_cast<int>(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, kWindowHeight));
-  window->flags = static_cast<uint32_t>(
+  window->flags = static_cast<SDL_WindowFlags>(
       SDL_GetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_FULLSCREEN));
-  // The console's screen is fixed; a "window" is the default NWindow, which the EGL surface and
-  // Dawn's swapchain both target.
-  window->native = nwindowGetDefault();
+  // SDL and Dawn's EGL surface use the same application window.
+  window->native = switchGetMainWindow();
   if (window->native == nullptr) {
-    set_error("nwindowGetDefault failed");
-    delete window;
+    set_error("No valid Switch NWindow");
+    SDL_DestroyWindow(window);
     return nullptr;
   }
-  nwindowSetDimensions(window->native, kWindowWidth, kWindowHeight);
-  // EGL rejects this handle with EGL_BAD_NATIVE_WINDOW, so record whether libnx considers it valid.
+  const Result result = nwindowSetDimensions(window->native, kWindowWidth, kWindowHeight);
+  if (R_FAILED(result)) {
+    SDL_Log("Switch NWindow dimensions: result=0x%08x", static_cast<unsigned>(result));
+  }
   SDL_Log("SDL window: %dx%d, native NWindow %p valid=%d", window->width, window->height,
           window->native, static_cast<int>(nwindowIsValid(window->native)));
   return window;
@@ -499,7 +502,9 @@ void SDL_DestroyWindow(SDL_Window* window) {
 
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window* window) { return window ? window->properties : 0; }
 
-SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* window) { return window ? window->flags : 0; }
+SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* window) {
+  return window ? window->flags.load(std::memory_order_relaxed) : 0;
+}
 
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h) {
   if (w) {
@@ -558,8 +563,21 @@ bool SDL_SetWindowIcon(SDL_Window* window, SDL_Surface* icon) {
   return true;
 }
 
-bool SDL_ShowWindow(SDL_Window* window) { return window != nullptr; }
-bool SDL_HideWindow(SDL_Window* window) { return window != nullptr; }
+bool SDL_ShowWindow(SDL_Window* window) {
+  if (window == nullptr) {
+    return false;
+  }
+  window->flags.fetch_and(~SDL_WINDOW_HIDDEN, std::memory_order_relaxed);
+  return true;
+}
+
+bool SDL_HideWindow(SDL_Window* window) {
+  if (window == nullptr) {
+    return false;
+  }
+  window->flags.fetch_or(SDL_WINDOW_HIDDEN, std::memory_order_relaxed);
+  return true;
+}
 bool SDL_RestoreWindow(SDL_Window* window) { return window != nullptr; }
 bool SDL_SyncWindow(SDL_Window* window) { return window != nullptr; }
 
@@ -621,17 +639,39 @@ uint32_t SDL_RegisterEvents(int numevents) {
 }
 
 void SDL_PumpEvents(void) {
-  // Poll the pad and synthesize the events Aurora's input layer listens to.
-  if (!g_padInitialized.load() && !g_initialized.load()) {
+  if (!g_initialized.load()) {
     return;
   }
-  pad_init();
-  const uint8_t buttons = read_buttons();
-  const uint8_t pressed = static_cast<uint8_t>(buttons & ~g_buttons);
-  const uint8_t released = static_cast<uint8_t>(~buttons & g_buttons);
-  g_buttons = buttons;
+  std::call_once(g_padInit, [] {
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&g_pad);
+    hidInitializeTouchScreen();
+  });
 
+  // Both the SDL events and the polled state come from the same HID sample.
+  std::lock_guard lock(g_padMutex);
+  padUpdate(&g_pad);
+  const bool connected = padIsConnected(&g_pad);
   const uint64_t timestamp = SDL_GetTicksNS();
+  if (connected != g_padConnected) {
+    g_padConnected = connected;
+    SDL_Event event{};
+    event.type = connected ? SDL_EVENT_GAMEPAD_ADDED : SDL_EVENT_GAMEPAD_REMOVED;
+    event.gdevice.timestamp = timestamp;
+    event.gdevice.which = kGamepadId;
+    push_event(event);
+  }
+  if (!connected) {
+    g_buttons = 0;
+    g_axes.fill(0);
+    return;
+  }
+
+  const uint64_t held = padGetButtons(&g_pad);
+  const uint32_t buttons = map_buttons(held);
+  const uint32_t pressed = buttons & ~g_buttons;
+  const uint32_t released = ~buttons & g_buttons;
+  g_buttons = buttons;
   for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i) {
     if ((pressed & (1u << i)) != 0) {
       SDL_Event event{};
@@ -653,38 +693,26 @@ void SDL_PumpEvents(void) {
     }
   }
 
-  // Sticks and triggers, quantised to SDL's int16 range.
-  static int16_t previousAxes[SDL_GAMEPAD_AXIS_COUNT] = {};
-  int16_t axes[SDL_GAMEPAD_AXIS_COUNT] = {};
-  const int32_t deadzone = 2000;
-  HidAnalogStickState left{};
-  HidAnalogStickState right{};
-  left.x = padGetStickPos(&g_pad, 0).x;
-  left.y = padGetStickPos(&g_pad, 0).y;
-  right.x = padGetStickPos(&g_pad, 1).x;
-  right.y = padGetStickPos(&g_pad, 1).y;
+  // SDL's vertical axes increase down, while libnx's increase up.
+  std::array<int16_t, SDL_GAMEPAD_AXIS_COUNT> axes{};
+  constexpr int32_t deadzone = 2000;
+  const auto left = padGetStickPos(&g_pad, 0);
+  const auto right = padGetStickPos(&g_pad, 1);
   axes[SDL_GAMEPAD_AXIS_LEFTX] = axis_from_stick(left.x, deadzone);
   axes[SDL_GAMEPAD_AXIS_LEFTY] = axis_from_stick(-left.y, deadzone);
   axes[SDL_GAMEPAD_AXIS_RIGHTX] = axis_from_stick(right.x, deadzone);
   axes[SDL_GAMEPAD_AXIS_RIGHTY] = axis_from_stick(-right.y, deadzone);
-  // ZL/ZR are axes in SDL3, not buttons.
-  padUpdate(&g_pad);
-  const uint64_t held = padGetButtons(&g_pad);
-  if ((held & HidNpadButton_ZL) != 0) {
-    axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] = 32767;
-  }
-  if ((held & HidNpadButton_ZR) != 0) {
-    axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = 32767;
-  }
+  axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] = (held & HidNpadButton_ZL) ? 32767 : 0;
+  axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = (held & HidNpadButton_ZR) ? 32767 : 0;
   for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i) {
-    if (axes[i] != previousAxes[i]) {
+    if (axes[i] != g_axes[i]) {
       SDL_Event event{};
       event.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
       event.common.timestamp = timestamp;
       event.gaxis.which = kGamepadId;
       event.gaxis.axis = static_cast<uint8_t>(i);
       event.gaxis.value = axes[i];
-      previousAxes[i] = axes[i];
+      g_axes[i] = axes[i];
       push_event(event);
     }
   }
@@ -846,47 +874,53 @@ bool SDL_HideCursor(void) { return true; }
 
 struct SDL_Gamepad {
   SDL_JoystickID id = kGamepadId;
-  int playerIndex = 0;
-  std::string name = "Switch Controller";
+  std::atomic<int> playerIndex{0};
+  const char* name = "Switch Controller";
 };
+
+namespace {
+// One logical PAD port lives for the process. SDL's borrowed lookups must return
+// the same handle as OpenGamepad, including across a controller reconnect.
+SDL_Gamepad g_gamepad;
+}
 
 extern "C" {
 
 SDL_JoystickID* SDL_GetGamepads(int* count) {
-  pad_init();
-  if (count) {
-    *count = 1;
-  }
-  auto* ids = static_cast<SDL_JoystickID*>(std::malloc(sizeof(SDL_JoystickID)));
-  if (ids) {
+  std::lock_guard lock(g_padMutex);
+  const int connectedCount = g_padConnected ? 1 : 0;
+  auto* ids = static_cast<SDL_JoystickID*>(SDL_calloc(connectedCount + 1, sizeof(SDL_JoystickID)));
+  if (ids && g_padConnected) {
     ids[0] = kGamepadId;
+  }
+  if (count) {
+    *count = ids ? connectedCount : 0;
   }
   return ids;
 }
 
-bool SDL_IsGamepad(SDL_JoystickID instanceId) { return instanceId == kGamepadId; }
+bool SDL_IsGamepad(SDL_JoystickID instanceId) { return SDL_GetGamepadFromID(instanceId) != nullptr; }
 
-SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID instanceId) {
-  if (instanceId != kGamepadId) {
-    return nullptr;
-  }
-  pad_init();
-  return new SDL_Gamepad();
-}
+SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID instanceId) { return SDL_GetGamepadFromID(instanceId); }
 
-void SDL_CloseGamepad(SDL_Gamepad* gamepad) { delete gamepad; }
+void SDL_CloseGamepad(SDL_Gamepad* gamepad) { (void)gamepad; }
 
 SDL_Gamepad* SDL_GetGamepadFromID(SDL_JoystickID instanceId) {
-  return instanceId == kGamepadId ? SDL_OpenGamepad(instanceId) : nullptr;
+  std::lock_guard lock(g_padMutex);
+  return instanceId == kGamepadId && g_padConnected ? &g_gamepad : nullptr;
 }
 
 SDL_Gamepad* SDL_GetGamepadFromPlayerIndex(int playerIndex) {
-  return playerIndex == 0 ? SDL_OpenGamepad(kGamepadId) : nullptr;
+  return playerIndex >= 0 && g_gamepad.playerIndex.load() == playerIndex
+             ? SDL_GetGamepadFromID(kGamepadId)
+             : nullptr;
 }
 
 SDL_JoystickID SDL_GetGamepadID(SDL_Gamepad* gamepad) { return gamepad ? gamepad->id : 0; }
 
-bool SDL_GamepadConnected(SDL_Gamepad* gamepad) { return gamepad != nullptr; }
+bool SDL_GamepadConnected(SDL_Gamepad* gamepad) {
+  return gamepad && SDL_GetGamepadFromID(gamepad->id) != nullptr;
+}
 
 SDL_Joystick* SDL_GetGamepadJoystick(SDL_Gamepad* gamepad) {
   return reinterpret_cast<SDL_Joystick*>(gamepad);
@@ -896,7 +930,7 @@ SDL_JoystickID SDL_GetJoystickID(SDL_Joystick* joystick) {
   return reinterpret_cast<SDL_Gamepad*>(joystick) ? kGamepadId : 0;
 }
 
-const char* SDL_GetGamepadName(SDL_Gamepad* gamepad) { return gamepad ? gamepad->name.c_str() : ""; }
+const char* SDL_GetGamepadName(SDL_Gamepad* gamepad) { return gamepad ? gamepad->name : ""; }
 
 SDL_GamepadType SDL_GetGamepadType(SDL_Gamepad* gamepad) {
   return gamepad ? SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO : SDL_GAMEPAD_TYPE_UNKNOWN;
@@ -904,7 +938,7 @@ SDL_GamepadType SDL_GetGamepadType(SDL_Gamepad* gamepad) {
 
 SDL_GamepadType SDL_GetRealGamepadType(SDL_Gamepad* gamepad) { return SDL_GetGamepadType(gamepad); }
 
-int SDL_GetGamepadPlayerIndex(SDL_Gamepad* gamepad) { return gamepad ? gamepad->playerIndex : -1; }
+int SDL_GetGamepadPlayerIndex(SDL_Gamepad* gamepad) { return gamepad ? gamepad->playerIndex.load() : -1; }
 
 bool SDL_SetGamepadPlayerIndex(SDL_Gamepad* gamepad, int playerIndex) {
   if (gamepad) {
@@ -913,9 +947,13 @@ bool SDL_SetGamepadPlayerIndex(SDL_Gamepad* gamepad, int playerIndex) {
   return gamepad != nullptr;
 }
 
-int SDL_GetGamepadPlayerIndexForID(SDL_JoystickID instanceId) { return instanceId == kGamepadId ? 0 : -1; }
+int SDL_GetGamepadPlayerIndexForID(SDL_JoystickID instanceId) {
+  return SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(instanceId));
+}
 
-SDL_JoystickID SDL_GetGamepadIDForPlayerIndex(int playerIndex) { return playerIndex == 0 ? kGamepadId : 0; }
+SDL_JoystickID SDL_GetGamepadIDForPlayerIndex(int playerIndex) {
+  return SDL_GetGamepadID(SDL_GetGamepadFromPlayerIndex(playerIndex));
+}
 
 uint16_t SDL_GetGamepadVendor(SDL_Gamepad* gamepad) { return gamepad ? 0x057E : 0; }
 
@@ -989,16 +1027,7 @@ void SDL_GetJoystickGUIDInfo(SDL_GUID guid, uint16_t* vendor, uint16_t* product,
   (void)guid;
 }
 
-SDL_JoystickID* SDL_GetJoysticks(int* count) {
-  if (count) {
-    *count = 1;
-  }
-  auto* ids = static_cast<SDL_JoystickID*>(std::malloc(sizeof(SDL_JoystickID)));
-  if (ids) {
-    ids[0] = kGamepadId;
-  }
-  return ids;
-}
+SDL_JoystickID* SDL_GetJoysticks(int* count) { return SDL_GetGamepads(count); }
 
 SDL_Joystick* SDL_OpenJoystick(SDL_JoystickID instanceId) {
   return instanceId == kGamepadId ? reinterpret_cast<SDL_Joystick*>(SDL_OpenGamepad(instanceId)) : nullptr;
@@ -1041,9 +1070,7 @@ int SDL_GetNumJoystickButtons(SDL_Joystick* joystick) {
 int SDL_GetNumJoystickHats(SDL_Joystick* joystick) { (void)joystick; return 0; }
 
 int16_t SDL_GetJoystickAxis(SDL_Joystick* joystick, int axis) {
-  (void)joystick;
-  (void)axis;
-  return 0;
+  return SDL_GetGamepadAxis(reinterpret_cast<SDL_Gamepad*>(joystick), static_cast<SDL_GamepadAxis>(axis));
 }
 
 bool SDL_GetJoystickAxisInitialState(SDL_Joystick* joystick, int axis, int16_t* state) {
@@ -1056,9 +1083,7 @@ bool SDL_GetJoystickAxisInitialState(SDL_Joystick* joystick, int axis, int16_t* 
 }
 
 bool SDL_GetJoystickButton(SDL_Joystick* joystick, int button) {
-  (void)joystick;
-  (void)button;
-  return false;
+  return SDL_GetGamepadButton(reinterpret_cast<SDL_Gamepad*>(joystick), static_cast<SDL_GamepadButton>(button));
 }
 
 uint8_t SDL_GetJoystickHat(SDL_Joystick* joystick, int hat) {
@@ -1115,15 +1140,19 @@ bool SDL_GamepadHasButton(SDL_Gamepad* gamepad, SDL_GamepadButton button) {
 }
 
 int16_t SDL_GetGamepadAxis(SDL_Gamepad* gamepad, SDL_GamepadAxis axis) {
-  (void)gamepad;
-  (void)axis;
-  return 0;
+  if (!SDL_GamepadHasAxis(gamepad, axis)) {
+    return 0;
+  }
+  std::lock_guard lock(g_padMutex);
+  return g_axes[axis];
 }
 
 bool SDL_GetGamepadButton(SDL_Gamepad* gamepad, SDL_GamepadButton button) {
-  (void)gamepad;
-  (void)button;
-  return false;
+  if (!SDL_GamepadHasButton(gamepad, button)) {
+    return false;
+  }
+  std::lock_guard lock(g_padMutex);
+  return (g_buttons & (1u << button)) != 0;
 }
 
 bool SDL_GamepadHasSensor(SDL_Gamepad* gamepad, SDL_SensorType type) {

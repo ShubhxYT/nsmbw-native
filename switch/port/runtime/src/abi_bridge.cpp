@@ -367,61 +367,23 @@ void TranslatedFunctionRegistry::Finalize() {
     }
 }
 
-extern "C" void switch_trace_mark(const char*);
-
 const TranslatedFunctionInfo* TranslatedFunctionRegistry::FindByAddressPtrSlow(uint32_t address) {
-    switch_trace_mark("REG: slow enter");
     if (RegistryFrozen().load(std::memory_order_acquire)) {
-        switch_trace_mark("REG: frozen path");
-        {
-            char line[64];
-            std::snprintf(line, sizeof line, "REG: frozen lookup %08x", address);
-            switch_trace_mark(line);
-        }
         const auto it = AddressIndex().find(address);
-        switch_trace_mark("REG: frozen find done");
         return it != AddressIndex().end() ? &Registry()[it->second] : nullptr;
     }
 
-    {
-        char line[64];
-        std::snprintf(line, sizeof line, "REG: lookup %08x", address);
-        switch_trace_mark(line);
-    }
-    switch_trace_mark("REG: locking");
     std::lock_guard<std::mutex> lock(RegistryMutex());
-    switch_trace_mark("REG: locked");
-    auto it = AddressIndex().find(address);
-    switch_trace_mark("REG: find done");
+    const auto it = AddressIndex().find(address);
     if (it != AddressIndex().end()) {
         return &Registry()[it->second];
     }
-    switch_trace_mark("REG: linear scan");
-    {
-        {
-            char line[128];
-            std::snprintf(line, sizeof line, "REG: vec=%p data=%p size=%llu cap=%llu",
-                          static_cast<void*>(&Registry()),
-                          static_cast<void*>(Registry().data()),
-                          static_cast<unsigned long long>(Registry().size()),
-                          static_cast<unsigned long long>(Registry().capacity()));
-            switch_trace_mark(line);
-        }
-        const std::string line = "REG: size " + std::to_string(Registry().size());
-        switch_trace_mark(line.c_str());
-        const size_t count = Registry().size();
-        for (size_t i = 0; i < count; ++i) {
-            if (i == 0 || (i % 256) == 0) {
-                const std::string at = "REG: at " + std::to_string(i);
-                switch_trace_mark(at.c_str());
-            }
-            if (Registry()[i].address == address) {
-                switch_trace_mark("REG: match");
-                return &Registry()[i];
-            }
+
+    for (const auto& entry : Registry()) {
+        if (entry.address == address) {
+            return &entry;
         }
     }
-    switch_trace_mark("REG: scan done");
     return nullptr;
 }
 

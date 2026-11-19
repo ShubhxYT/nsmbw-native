@@ -5,7 +5,7 @@
 #
 # With no arguments it only relinks. Unit paths are relative to /src (the mounted working tree),
 # e.g. switch/log_channel.cpp or runtime/src/main.cpp. The object name follows build-pie.sh:
-# the path below runtime/src (or switch/) with slashes replaced by underscores.
+# the path below runtime/src or aurora-main/lib with slashes replaced by underscores.
 set -euo pipefail
 
 DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
@@ -16,13 +16,23 @@ OBJ=/src/obj-pie
 PACK=/pack
 TID=${TID:-01004E53A1B50000}
 NAME=${NAME:-NSMBW}
+SPECS=${SPECS:-/src/switch/switch-rw.specs}
+if [ ! -f "$SPECS" ]; then
+    echo "Missing linker specs: $SPECS. Run /src/switch/make-rw-ldscript.py first." >&2
+    exit 1
+fi
+
+log_flags=()
+if [ "${NSMBW_LOG_HOST+x}" = x ]; then
+    log_flags+=("-DNSMBW_LOG_HOST=\"$NSMBW_LOG_HOST\"")
+fi
 
 INCLUDES="-isystem $DEVKITPRO/libnx/include -isystem $DEVKITPRO/portlibs/switch/include
   -I/src/runtime/include -I/src/runtime/src -I/src
   -isystem /src/runtime/third_party -isystem /src/runtime/third_party/toml11
   -isystem /src/aurora-main/include -isystem /src/aurora-main/lib
   -isystem /deps/SDL/include -isystem /deps/imgui -isystem /deps/fmt/include
-  -isystem /deps/xxhash -isystem /deps/tracy/public
+  -isystem /deps/xxhash -isystem /deps/tracy/public -isystem /deps/absl
   -isystem /deps/sqlite -isystem /deps/png -isystem /deps/zlib
   -isystem $DAWN/include -isystem $DAWN/build-switch/gen/include"
 DEFINES="-D__SWITCH__ -DTARGET_PC -DCRYPTOPP_DISABLE_ASM"
@@ -43,7 +53,7 @@ for unit in "${units[@]:-}"; do
         switch/*)
             base=$(basename "$unit" .cpp)
             # shellcheck disable=SC2086
-            $CXX -std=gnu++20 -D__SWITCH__ -fPIE -c -O2 -fexceptions -frtti \
+            $CXX -std=gnu++20 -D__SWITCH__ "${log_flags[@]}" -fPIE -c -O2 -fexceptions -frtti \
                 -I/src/switch -isystem $DEVKITPRO/libnx/include -isystem /deps/SDL/include \
                 -isystem /src/runtime/include "$unit" -o "$OBJ/$base.o"
             ;;
@@ -55,7 +65,7 @@ for unit in "${units[@]:-}"; do
             ;;
         aurora-main/*)
             rel=${unit#aurora-main/lib/}
-            base="aur_$(echo "$rel" | sed 's|/|_|g; s|\.cpp$|.o|')"
+            base="aur_${rel//\//_}.o"
             # shellcheck disable=SC2086
             $CXX -std=gnu++20 $DEFINES -DAURORA_ENABLE_GX -DWEBGPU_DAWN \
                 -DDAWN_ENABLE_BACKEND_OPENGL -DDAWN_ENABLE_BACKEND_OPENGLES \
@@ -71,47 +81,71 @@ OBJS="$OBJS $(ls "$OBJ"/aurora/*.o "$OBJ"/gen/*.o "$OBJ"/game/*.o "$OBJ"/sys/*.o
 LIBS=$(ls "$OBJ"/lib/*.o | grep -vE "cryptopp_(test|bench|datatest|dlltest|validat|regtest)")
 ABSL=$(ls "$OBJ"/absl/*.o | grep -vE "${ABSL_EXCLUDE:-print_hash_of|gentables|mock_log|status_matchers|vdso_support|elf_mem_image|stack_consumption|failure_signal_handler|examine_stack}")
 
-$CXX -specs=${SPECS:-$DEVKITPRO/libnx/switch.specs} -Wl,-z,nopack-relative-relocs -Wl,-z,notext \
+wrap_flags=()
+if [ -f "$OBJ/thread_tls.o" ]; then
+    wrap_flags+=(-Wl,--wrap=pthread_create,--wrap=pthread_mutex_lock,--wrap=pthread_mutex_trylock
+                 -Wl,--wrap=pthread_cond_wait,--wrap=pthread_cond_timedwait,--wrap=pthread_join,--wrap=pthread_detach)
+fi
+if [ -f "$OBJ/cxa_throw_probe.o" ]; then
+    wrap_flags+=(-Wl,--wrap=__cxa_throw,--wrap=_ZSt9terminatev,--wrap=pthread_once,--wrap=_ZSt20__throw_system_errori)
+fi
+
+if ! "$CXX" -specs="$SPECS" -Wl,-z,nopack-relative-relocs -Wl,-z,notext \
+    "${wrap_flags[@]}" \
     -o /src/wiicompiled.elf \
     $OBJS $LIBS $ABSL "$OBJ"/fmt/*.o \
     "$DAWN"/build-switch/src/dawn/native/libwebgpu_dawn.a /src/switch/execvp_stub.S \
     -L$DEVKITPRO/libnx/lib -L$DEVKITPRO/portlibs/switch/lib -lnx -lEGL -lGLESv2 -lglapi \
-    ${RUNTIME_LIBS:-/src/piclibs/libstdc++_pic.a /src/piclibs/libstdc++fs_pic.a /src/piclibs/libc_pic.a /src/piclibs/libm_pic.a /src/piclibs/libgcc_pic.a /src/piclibs/libsysbase_pic.a} \
-    > /src/link-rebuild.log 2>&1
-echo "link exit=$?"
-if grep -qE "undefined reference|multiple definition" /src/link-rebuild.log; then
-    echo "link failed"; grep -E "undefined reference|multiple definition" /src/link-rebuild.log | head -5
+    ${RUNTIME_LIBS:--L$DEVKITPRO/devkitA64/aarch64-none-elf/lib -lstdc++ -lc -lm -lgcc -lsysbase} \
+    -ldrm_nouveau -lnx > /src/link-rebuild.log 2>&1; then
+    tail -20 /src/link-rebuild.log >&2
     exit 1
 fi
+echo "link ok"
 
-python3 /src/patch_dynamic.py /src/wiicompiled.elf
+python3 /src/switch/patch_dynamic.py /src/wiicompiled.elf
 
-python3 - <<'PY'
-import re, struct, subprocess
-elf = "/src/wiicompiled.elf"
-d = open(elf, "rb").read()
-out = subprocess.run(["/opt/devkitpro/devkitA64/aarch64-none-elf/bin/readelf", "-SW", elf],
-                     capture_output=True, text=True).stdout
-ro = rela = None
-for line in out.splitlines():
-    m = re.search(r"\.rodata\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+?\s+([0-9a-f]+)", line)
-    if m and ro is None:
-        ro = (int(m.group(1), 16), int(m.group(2), 16))
-    m2 = re.search(r"\.rela\.dyn\s+RELA\s+[0-9a-f]+\s+([0-9a-f]+)\s+([0-9a-f]+)", line)
-    if m2 and rela is None:
-        rela = (int(m2.group(1), 16), int(m2.group(2), 16))
-count = rela[1] // 24
-bad = 0
-for i in range(count):
-    off, _i, _a = struct.unpack_from("<QQq", d, rela[0] + i * 24)
-    if ro[0] <= off < ro[0] + ro[1]:
-        bad += 1
-print(f"RODATA RELOCATIONS: {bad} of {count}")
+python3 - "$DEVKITPRO/devkitA64/aarch64-none-elf/bin/readelf" <<'PY'
+import re
+import subprocess
+import sys
+
+headers, relocations = subprocess.check_output(
+    [sys.argv[1], "-lW", "-rW", "/src/wiicompiled.elf"], text=True
+).split("Relocation section '.rela.dyn'", 1)
+writable = []
+for line in headers.splitlines():
+    fields = line.split()
+    if fields and fields[0] == "LOAD" and "W" in "".join(fields[6:-1]):
+        start = int(fields[2], 16)
+        writable.append((start, start + int(fields[5], 16)))
+
+targets = [int(address, 16) for address in re.findall(r"^\s*([\da-fA-F]+)\s+\S+\s+R_AARCH64_",
+                                                      relocations.split("\n\n", 1)[0], re.M)]
+if not targets or not writable:
+    sys.exit("Missing dynamic relocations or writable load segments")
+bad = sum(not any(start <= address < end for start, end in writable) for address in targets)
+print(f"RELOCATIONS OUTSIDE WRITABLE SEGMENTS: {bad} of {len(targets)}")
+if bad:
+    sys.exit(1)
 PY
 
 "$DEVKITPRO/tools/bin/elf2nso" /src/wiicompiled.elf "$PACK/exefs/main" && echo "nso ok"
 
 if [ "$pack" = "1" ]; then
+    npdm_json=$(mktemp)
+    trap 'rm -f "$npdm_json"' EXIT
+    python3 - /src/switch/game.npdm.json "$TID" "$npdm_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source, title_id, output = sys.argv[1:]
+config = json.loads(Path(source).read_text())
+config["title_id"] = f"0x{int(title_id, 16):016x}"
+Path(output).write_text(json.dumps(config))
+PY
+    "$DEVKITPRO/tools/bin/npdmtool" "$npdm_json" "$PACK/exefs/main.npdm"
     rm -rf "$PACK/out_rb" && mkdir -p "$PACK/out_rb"
     /deps/hacBrewPack/hacbrewpack --keyset "$PACK/keys.dat" --exefsdir "$PACK/exefs" \
         --controldir "$PACK/control_g" --romfsdir "$PACK/romfs" --nologo --plaintext \

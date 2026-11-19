@@ -1,0 +1,20 @@
+--- a/lib/dawn/BackendBinding.cpp
++++ b/lib/dawn/BackendBinding.cpp
+@@ -8,6 +8,8 @@
+ 
+ #if defined(__SWITCH__)
+ #include <switch.h>
++
++extern "C" NWindow* switchGetMainWindow();
+ #endif
+ 
+ namespace aurora::webgpu::utils {
+@@ -33,7 +35,7 @@
+   // directly. Dawn's OpenGL ES surface path takes it through the opaque native-window descriptor.
+   std::shared_ptr<wgpu::SurfaceSourceAndroidNativeWindow> desc =
+       std::make_shared<wgpu::SurfaceSourceAndroidNativeWindow>();
+-  desc->window = nwindowGetDefault();
++  desc->window = switchGetMainWindow();
+   return desc;
+ #elif defined(SDL_PLATFORM_LINUX)
+   const char* driver = SDL_GetCurrentVideoDriver();

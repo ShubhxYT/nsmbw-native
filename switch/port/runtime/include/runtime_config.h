@@ -792,9 +792,7 @@ inline RuntimeUserConfig LoadConfigFile() {
 }
 
 inline const RuntimeUserConfig& Get() {
-    switch_trace_mark("CFG enter");
     static RuntimeUserConfig config = LoadConfigFile();
-    switch_trace_mark("CFG loaded");
     return config;
 }
 

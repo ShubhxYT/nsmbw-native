@@ -12,12 +12,15 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
 | **macOS** | ✅ tested — Apple silicon, ~58 fps, Metal |
 | **Windows** | ✅ tested — Windows 11 x64, ~58 fps, D3D12 |
 | **iPad / iPhone** | ✅ tested — iPad Pro M4, iPadOS 26, unsigned IPA via LiveContainer |
+| **Nintendo Switch Lite** | Experimental v1.0.4 NSP reaches gameplay with working controls. Frame times still limit playability. [Hardware measurements](docs/REBUILD.md#switch-lite-performance) |
 | **Game version** | USA, `SMNE01`, revision 1 |
 | **LAN play** | ⚠️ beta (desktop only) |
 | **Known issue** | ⚠️ world-map crash after a course — [details](docs/known-issues.md) |
 | **iOS gyro** | ⚠️ controller motion does not reach the app; L1/R1 tilt instead — [details](docs/ios.md#known-gaps) |
 
 <p align="center"><img src="docs/ipad-livecontainer.gif" alt="New Super Mario Bros. Wii installed in LiveContainer on an iPad" width="720"></p>
+
+<sub>If this saves you time, a star helps other people find it — for a project like this, that is most of how it gets discovered.</sub>
 
 ## What you need
 

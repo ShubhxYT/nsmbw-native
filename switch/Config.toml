@@ -1,2 +1,4 @@
-# Switch port configuration. The extracted game goes beside this file.
-dvd_root = "sdmc:/switch/nsmbw/game"
+# Put the extracted disc's sys and files directories beside this file.
+[paths]
+dvd_root = "."
+nand_root = "NAND"

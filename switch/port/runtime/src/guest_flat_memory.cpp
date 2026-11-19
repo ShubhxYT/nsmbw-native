@@ -623,16 +623,30 @@ void Initialize(const std::vector<RegionRequest>& regions) {
     EnsureReservation();
 
 #if defined(__SWITCH__)
-    // Horizon has no second alias to create, and the shared section/mmap path below cannot run
-    // there: CreateSharedMemory has no Horizon implementation and returns -1.
-    // The arena taken by EnsureReservation() already IS the host view - g_base is offset so that
-    // g_base + guestAddress addresses the guest byte - so record it as one region per request and
-    // stop. Every access is bounds-checked through MappedRegions(), and there are no page
-    // protections to apply on Horizon.
+    // Horizon cannot create aliased virtual mappings. Point each physical and
+    // uncached Wii window at its cached bytes in the one 512 MiB arena instead.
+    // The locked cache is a separate allocation outside that guest RAM window.
+    static uint8_t* lockedCache = nullptr;
     for (const auto& region : regions) {
         if (region.size == 0) continue;
-        MappedRegions().push_back(MappedRegion{region.base, region.size, region.size, 0,
-                                               g_base + region.base});
+        uint8_t* hostView = nullptr;
+        if (region.backing == Backing::Mem1) {
+            hostView = g_base + 0x80000000ull + (region.base & 0x01FFFFFFu);
+        } else if (region.backing == Backing::Mem2) {
+            hostView = g_base + 0x90000000ull + (region.base & 0x0FFFFFFFu);
+        } else if (region.base >= 0x80000000u && region.base < 0xA0000000u &&
+                   static_cast<uint64_t>(region.base) + region.size <= 0xA0000000ull) {
+            hostView = g_base + region.base;
+        } else if (region.base == 0xE0000000u) {
+            if (lockedCache == nullptr) {
+                lockedCache = static_cast<uint8_t*>(std::calloc(1, region.size));
+            }
+            hostView = lockedCache;
+        }
+        if (hostView == nullptr) {
+            throw std::runtime_error("Switch guest region has no backing allocation");
+        }
+        MappedRegions().push_back(MappedRegion{region.base, region.size, region.size, 0, hostView});
     }
     g_activeRegions = regions;
     g_initialized = true;
@@ -731,57 +745,6 @@ uint8_t* Base() {
 
 uint8_t* HostPointer(uint32_t guestAddress) {
     if (!g_initialized) return nullptr;
-#if defined(__SWITCH__)
-    // The arena is a single 512 MiB block, so the uncached mirrors cannot be separate mappings.
-    // 0xC0000000 (MEM1 uncached) and 0xD0000000 (MEM2 uncached) are the same physical memory as
-    // their cached windows 1 GiB lower; fold them so SDK reads through the alias (OSInit's IOS
-    // version check among them) land on real storage.
-    if (guestAddress >= 0xC0000000u && guestAddress < 0xE0000000u) {
-        guestAddress -= 0x40000000u;
-    }
-#endif
-#if defined(__SWITCH__)
-    // The arena covers guest 0x80000000..0x9FFFFFFF only; g_base sits 2 GiB before it, so an access
-    // below 0x80000000 computes a pointer that is not mapped and faults instead of being reported.
-    // Horizon cannot reserve 2 GiB of guard space for that range, so such accesses land in a small
-    // zero page instead: reads return 0 (as they would from unmapped Wii low memory) and writes are
-    // discarded rather than killing the process. Every hit is logged, so a real out-of-range access
-    // is still visible.
-    if (guestAddress < 0x80000000u) {
-        static int reported = 0;
-        if (reported < 8) {
-            ++reported;
-            char line[80];
-            std::snprintf(line, sizeof line, "GF: NULLPAGE guest=%08x", guestAddress);
-            switch_trace_mark(line);
-        }
-        static uint8_t nullPage[0x10000];
-        return nullPage + (guestAddress & 0xFFFFu);
-    }
-#endif
-#if defined(__SWITCH__)
-    // Anything outside the arena is not backed: the arena is one 512 MiB block covering
-    // 0x80000000..0x9FFFFFFF, so the 0xC0000000 MEM1 alias and other mirrors fall outside it.
-    {
-        static unsigned long long arenaBegin = 0;
-        static unsigned long long arenaEnd = 0;
-        if (arenaBegin == 0) {
-            arenaBegin = reinterpret_cast<unsigned long long>(g_base) + 0x80000000ull;
-            arenaEnd = arenaBegin + 0x20000000ull;  // the 512 MiB Switch arena
-        }
-        const auto host = reinterpret_cast<unsigned long long>(g_base) + guestAddress;
-        if (guestAddress >= 0x80000000u && (host < arenaBegin || host >= arenaEnd)) {
-            static int reported = 0;
-            if (reported < 8) {
-                ++reported;
-                char line[96];
-                std::snprintf(line, sizeof line, "GF: OUTSIDE ARENA guest=%08x host=%llx",
-                              guestAddress, host);
-                switch_trace_mark(line);
-            }
-        }
-    }
-#endif
     for (const auto& region : MappedRegions()) {
         if (guestAddress < region.guestBase) continue;
         const uint64_t offset = static_cast<uint64_t>(guestAddress) - region.guestBase;

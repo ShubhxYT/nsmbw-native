@@ -1,11 +1,13 @@
 # NSMBW on Nintendo Switch — full project state and rebuild guide
 
 **Purpose of this document.** Everything needed to understand, recreate, or continue this project from
-nothing, without the working tree. It records what the goal is, what has been proven, every platform
-defect found and how it was defeated, the exact environment, and the single blocker in flight.
+nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
+build environment, and the remaining work.
 
-Status at time of writing: **the port builds, installs, launches, initialises graphics, runs the game's
-own code — but has never presented a frame.** One defect remains between here and a first frame.
+**Current status (2026-11-19).** The v1.0.4 NSP boots on the Switch Lite, reaches gameplay, and
+accepts controller input. The port creates Wii save data on hardware, and a save reload has been
+verified in Ryujinx. Frame times still limit playability on the Switch Lite at the original 1× render
+scale. See the [hardware measurements](#switch-lite-performance) for the remaining bottleneck.
 
 ---
 
@@ -37,9 +39,9 @@ milestone on the way, **not** the acceptance bar.
 
 ---
 
-## 2. The blocker in flight (start here)
+## 2. Window and frame presentation
 
-Surface creation fails, so nothing is ever drawn and Ryujinx keeps showing its loading splash.
+The original surface creation failure left Ryujinx on its loading splash.
 
 Evidence chain, each line produced by an actual run:
 
@@ -58,8 +60,7 @@ Switch EGL checks `nwindowIsValid` before anything else and refuses it.
 startup. This port **overrides `__appInit`**, so that startup never runs. Same class of problem as the
 NPDM service table (§4.3).
 
-**The fix being applied when work stopped** — build the window explicitly instead of trusting the
-default:
+The port now creates its window explicitly:
 
 1. In `__appInit`, after `appletInitialize()`: initialise VI as the application.
 2. Open the default display and create a VI layer on it.
@@ -67,10 +68,50 @@ default:
 4. Have **both** the SDL platform layer and Aurora's surface descriptor use that handle, falling back
    to the default only if creation failed.
 
-This compiled once in an earlier form; the last edit (moving an `extern "C"` declaration to file scope,
-which is required — it cannot live inside a function) was not yet verified by a run. **Verify that
-first.** If `valid=1` appears and `eglCreateWindowSurface` succeeds, the next milestone is a presented
-frame.
+The explicit window verified as `valid=1`, and `eglCreateWindowSurface` succeeded. Two additional
+changes let the renderer present the startup overlay:
+
+- The [Dawn queue patch](../switch/patches/dawn-switch-fence-fallback.patch) calls `glFinish` when Mesa
+  exposes no EGL fence sync API. This avoids a call through a null function pointer on first submit.
+- The [Dawn presentation patch](../switch/patches/dawn-switch-present.patch) uses the native window
+  dimensions when Mesa returns a 0×0 EGL surface. The native window reports 1280×720, and Ryujinx
+  displayed the port's credits overlay once Dawn used those dimensions for the final blit.
+
+### The guest picture
+
+The startup overlay rendered but the guest picture stayed black. A synthetic GX quad rendered
+through the same viewport and display copy. OpenGL readback showed the expected vertex bytes in the
+upload and destination buffers, but the vertex shader read different values through its storage
+binding. Apply the [Aurora vertex texture patch](../switch/patches/aurora-switch-vertex-textures.patch)
+to route vertex and indexed attribute reads through `R32Uint` textures on Switch. The patch keeps
+the packed GX data and shader decoders intact.
+
+The first confirmed guest picture was the Wii Remote wrist strap screen. Ryujinx ran at about
+60 FPS and the VI watchdog counted 1,730 guest frames at 30 seconds. The watchdog's
+`first visible guest frame presented` message indicates a display copy with VI black disabled.
+Verify the actual picture in the viewport.
+
+### Wii system memory
+
+`NANDSafeOpen` stopped at `wiimj2d.sav` because the standard library's file copy returned
+`Function not implemented` on the Switch SD mount. The shared shadow-copy code now reads and writes
+bytes directly on Horizon. Ryujinx also rejects a rename over an existing destination, so the save
+commit flushes the scratch data, renames the original to a sibling backup, and publishes the scratch
+file under the original name. The next NAND access recovers the original if publishing was
+interrupted before the new file took its place.
+
+Ryujinx created a 16,288-byte `wiimj2d.sav` and a 29,344-byte `banner.bin` from a fresh game-save
+directory. The guest displayed its save-created confirmation. To simulate an interruption before
+publish, the new save was moved to `.nandsafe.bak` with the emulator stopped. On restart the game
+restored the original filename, read all 16,288 bytes, and reached the title screen. The restored
+save matched the original byte for byte.
+
+### Controller input
+
+The Switch SDL shim samples the libnx pad and publishes both SDL events and polled button and axis
+state. On connection or disconnection it sends the device event Aurora uses to assign Player 1.
+The virtual pad has a stable SDL handle. Ryujinx's keyboard-to-Pro-Controller A mapping opened
+the file selection menu.
 
 ---
 
@@ -85,14 +126,16 @@ Every item below was confirmed by a run on hardware or in Ryujinx, not assumed.
 - Abseil, fmt, mbedTLS, SQLite, zlib, libpng, cryptopp link and run.
 - Guest memory: a 512 MiB arena, page tables, fast-path tables, low-memory seeding.
 - The extracted disc's embedded DOL/REL data sections are loaded.
-- All **184** DOL static constructors execute.
+- The guest reaches the DOL constructor loop and proceeds into its boot scene.
 - The translated-function registry holds the full map (not the truncated 396 entry subset).
 - The guest executes translated PowerPC code and dispatches indirectly.
 - **Aurora + Dawn + Mesa EGL initialise successfully**: an OpenGL ES 3.2 adapter is found and the
   WebGPU device is created (`aurora status=0`), with the renderer reaching swapchain setup.
 - Zero unhandled C++ exceptions in the current build.
 
-What is *not* proven: a presented frame, audio, input, the guest main loop.
+The Switch Lite has displayed gameplay and accepted controller input. The hardware logs show
+Wii save creation and nonzero audio output samples. Saving during a full level run, reloading that
+save, and audible playback on hardware still need verification.
 
 ---
 
@@ -109,11 +152,23 @@ The console refuses to install anything it reads as an update or addon ("Game us
 update", "Creating game… Failed 0x2e4"). A **base application** title ID must begin `0100`, have
 non-zero middle groups, and end `0000`. The working value is `01004E53A1B50000`.
 
-### 4.3 `npdmtool` silently truncates short service names
-An NPDM granting `hid` or `sm:` loses those entries because the tool drops names shorter than four
-characters, and the `"*"` wildcard produces an empty table. libnx's default `__appInit` then aborts at
-`smInitialize`. **Fix: override the weak `__appInit`** and initialise only what exists, ignoring
-failures. Do not use stdio inside it — it runs inside CRT before streams exist.
+### 4.3 The native application needs an explicit service list
+
+The earlier NSP shipped an NPDM without the applet, video, GPU, and input services used during
+startup. The Switch log recorded applet error `0x5759` and video error `0x1015` before window
+creation. The package now builds its NPDM from `switch/game.npdm.json`, including `apm`, `appletOE`,
+`vi:u`, `nvdrv`, `nvdrv:a`, and `hid`. The generated binary includes the entries in both access
+tables. The updated package launches on the Switch Lite and reaches gameplay.
+
+The custom `__appInit` logs the applet and window setup results. It uses raw file writes because
+the CRT has yet to initialize stdio.
+
+### Hardware stall after window creation
+
+The v1.0.1 hardware trace reached `nwindowCreateFromLayer` successfully and stopped inside the
+diagnostic that replaced the C++ constructor table. The v1.0.2 build removes that diagnostic and
+lets the normal startup code call the constructors. The `CRT: logger opened` and `MAIN` markers
+identify the boundaries of that stage.
 
 ### 4.4 `.dynamic` had no `DT_NULL` terminator
 libnx links with no spare dynamic tags, so `__nx_dynamic` walked past the section into garbage and
@@ -217,6 +272,10 @@ scanned too early the first time.
 - `nand_root` must be configured, and the value must be a **relative** path. `std::filesystem` treats
   `sdmc:/...` as relative, so an "absolute-looking" value gets joined onto the config directory and
   doubled.
+- Put both `dvd_root` and `nand_root` under `[paths]`. A Switch v1.0.2 launch with those keys at
+  the top level reached the Wii runtime, fell back to creating a managed NAND, and exited during
+  NAND initialization. With `dvd_root = "."` and `nand_root = "NAND"` under `[paths]`, the Switch
+  completed an EGL buffer swap and created the 16,288-byte save and 29,344-byte banner.
 
 ### 4.18 `pthread_detach` returns ENOSYS and killed the guest
 A `std::system_error` with code 88 (newlib `ENOSYS`) escaped from inside a `std::call_once` callable
@@ -264,6 +323,8 @@ Removed because they crash or conflict: `sys-ftpd`, `sys-ftpd-freeze`, `sys-ftp-
 disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the newest NSP, and the
 logs (`boot.log`, `init.log`).
 
+The latest package on the test console is `sdmc:/switch/nsmbw/nsmbw-v1.0.4-switch-performance.nsp`.
+
 Install is **human-only** (ES via DBI or Goldleaf); an agent cannot install an NSP remotely. Installs
 take several minutes for a ~64–69 MB package.
 
@@ -277,7 +338,9 @@ directory that does not survive a reboot.
 - `docs/` — this document and the original handoff notes.
 - `switch/` — the Switch platform layer: startup override, TLS bootstrap and per-thread attach, SDL3
   subset over libnx, Horizon POSIX shims, Abseil shim, log channel, stub backends.
-- `switch/patches/` — the Dawn and Abseil edits as instructions, since those live outside the repo.
+- `switch/patches/` — the external changes for Aurora, Dawn, and Abseil. Apply
+  `aurora-switch-window.patch`, `aurora-switch-vertex-textures.patch`, and
+  `aurora-switch-direct-efb-resolve.patch` in the Aurora tree. Apply the Dawn patches in the Dawn tree.
 - `switch/port/` — a mirror of every *runtime* source file that was modified, with a README naming what
   changed and why.
 - Build scripts: full build, PIC-library derivation, relink, incremental single-unit relink, packaging,
@@ -290,12 +353,13 @@ directory that does not survive a reboot.
 
 1. **Full object build** — runtime, Aurora, generated shards, libraries, Abseil, mbedTLS, platform
    layer; position-independent, into one object directory.
-2. **PIC libraries** — surgically rename only relocation-targeted `.rodata` sections (see §4.6). With
-   §4.5 working this step becomes optional.
+2. **Standard runtime libraries** — use the original devkitPro archives with the writable
+   `.rodata` linker layout. The old PIC archive variants are useful for historical diagnostics
+   (see §4.6).
 3. **Registration shards** — compile the 16 bulk registration units (§4.20).
-4. **Link** — custom specs file pointing at the modified linker script; RELA rather than RELR; GL
-   libraries followed by nouveau DRM and libnx again (§4.16); wrap flags for the guest-thread and
-   exception instrumentation.
+4. **Link** — generate `switch/switch-rw.specs` with `switch/make-rw-ldscript.py`. The incremental
+   `switch/rebuild.sh` uses these specs by default, selects RELA relocations, links nouveau DRM and
+   libnx after the GL libraries, and wraps the guest thread and exception functions.
 5. **Post-link** — patch the dynamic section terminator (§4.4); verify zero read-only relocations.
 6. **Package** — convert to NSO, write the NPDM, build the NCA/NSP with a **trimmed** keyset.
 
@@ -306,15 +370,51 @@ title ID.
 
 ## 8. Test harness
 
-**Ryujinx is the iteration loop.** It reproduces the console exactly, needs no install, and gives stack
-traces. The emulated SD card is a real directory and must contain the same layout as the console, or the
-app's first `fopen` fails silently and there are no logs at all.
+**Ryujinx is the iteration loop.** It can launch the NSP directly and reports emulator faults. The
+emulated SD card must contain the same layout as the console for the port to find its input files and
+write logs. Confirm each milestone separately on hardware.
+
+For emulator runs, set `NSMBW_LOG_HOST` to an empty string when compiling `switch/log_channel.cpp`
+with `switch/rebuild.sh`. The build writes to the emulated SD card without trying the TCP log listener.
 
 Two in-app diagnostics make the port debuggable:
 
 - `init.log` — one line per startup step, written with raw file writes (no stdio) so it survives crashes.
 - `boot.log` — the runtime's own log, including Aurora's `[aurora::gpu]` lines, which are the only
   place Dawn/EGL failures are described.
+
+The v1.0.1 startup diagnostic build closes each write to `init.log` before continuing. This lets
+another process read the startup trace while the game runs. The standard output redirection keeps
+`boot.log` open until the game closes.
+
+Keep traces out of the configuration getter. It runs throughout gameplay, and the repeated
+`CFG enter` and `CFG loaded` markers previously grew `init.log` to 134 MB. A fresh instrumented boot
+after removing the per-lookup writes produced about 44 KB of startup logs.
+
+### Switch Lite performance
+
+Both hardware runs below used the original 1× render scale. The table compares medians from
+the recorded slow frames in each scene. The last three columns show where v1.0.4 spent that time.
+
+| Scene | v1.0.3 frame | v1.0.4 frame | v1.0.4 before renderer finalization | v1.0.3 renderer finalization | v1.0.4 renderer finalization |
+|---|---:|---:|---:|---:|---:|
+| Boot (`0x000`) | 271.4 ms | 273.6 ms | 221.2 ms | 51.8 ms | 50.6 ms |
+| Game setup (`0x00A`) | 314.9 ms | 270.6 ms | 243.6 ms | 50.7 ms | 26.7 ms |
+| Cutscene (`0x008`) | 314.9 ms | 295.7 ms | 230.5 ms | 73.4 ms | 66.6 ms |
+
+The [direct EFB resolve patch](../switch/patches/aurora-switch-direct-efb-resolve.patch) reads the
+embedded framebuffer after the draw pass and before the next clear on OpenGL ES. This skips an
+intermediate texture copy. In Ryujinx at 1×, the median logged slow frame in scene `0x005` fell from
+88 ms to 22 ms. On Switch Lite, the game setup measurements show a shorter renderer finalization
+step. The interval before that step remained around 244 ms, which explains why the player still
+experienced severe slowdown. The `game` field measures that interval in wall-clock time and includes
+guest execution, GX calls, and any waits. The log cannot attribute it to a specific subsystem yet.
+
+Close the game before retrieving `sdmc:/switch/nsmbw/boot.log` over FTP. The log records up to 30
+slow frames per minute. Its two startup watchdog messages counted 26 guest frames at 12 seconds and
+354 at 30 seconds on v1.0.4. That works out to 18.2 guest frames per second in that 18-second window.
+The cutscene also recorded a 427.9 ms frame with zero disc reads. The sampled slow-frame medians
+describe stalls. A sustained gameplay FPS average needs a continuous frame count over the same course.
 
 **Tiny probe NSPs** are the fastest tool in the kit: a 300 KB package that reproduces one runtime
 behaviour (config load, `<iostream>`, thread-local, EGL surface) in ~40 seconds. Several of the hardest
@@ -345,13 +445,12 @@ bugs in §4 were found this way rather than through the 64 MB game package.
 
 ---
 
-## 10. Remaining work after the surface
+## 10. Remaining work on Switch Lite
 
-1. Present a frame (the immediate milestone).
-2. Audio — `audren` initialisation and the DSP mix path.
-3. Input — `hid` is still blocked for the *NPDM* by §4.3, which may need a different NPDM writer.
-4. Guest main loop, then actual gameplay.
-5. NSP polish: icon, version string, replacing the placeholder ticket.
+1. Measure continuous FPS and frame-time percentiles on a repeatable course at 1×. Time guest execution,
+   GX and driver calls, and scheduler waits separately to find the cause of the long frames.
+2. Verify a full level run, audible output, and save reload across a restart on hardware.
+3. Finish NSP metadata and packaging polish.
 
 ---
 
@@ -361,11 +460,10 @@ bugs in §4 were found this way rather than through the 64 MB game package.
 
 * **Acceptance bar is full playability** — menus, input, audio, and levels that can be played. A first
   frame is a milestone, not the finish line.
-* **Work is paused.** Nobody resumes this automatically; it is handed off via this document.
 * **This repository is the long-term home**, on the branch `switch-playable`, created from `switch-port`
   for the push to full playability. The platform layer is not being folded into the runtime's own tree.
-* **Ryujinx is the only validation environment for now.** The surface fix does not need console
-  validation before continuing.
+* **Validate native performance on the Switch Lite.** Ryujinx is useful for testing rendering and
+  input changes. Compare frame timings on the console before judging playability.
 * **Game data and console keys never enter the repository** — see §0.
 
 **Open:**

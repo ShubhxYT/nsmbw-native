@@ -1,0 +1,60 @@
+--- a/src/dawn/native/opengl/SwapChainEGL.cpp
++++ b/src/dawn/native/opengl/SwapChainEGL.cpp
+@@ -28,10 +28,12 @@
+ #include "src/dawn/native/opengl/SwapChainEGL.h"
+ 
+ extern "C" void switch_trace_mark(const char*);
++#include <atomic>
+ #include <cstdio>
+ #if defined(__SWITCH__)
+ // libnx's default NWindow, declared here because Dawn's include path does not carry libnx headers.
+ extern "C" void* nwindowGetDefault(void);
++extern "C" uint32_t nwindowGetDimensions(void* window, uint32_t* width, uint32_t* height);
+ #endif
+ 
+ #include <utility>
+@@ -118,6 +120,28 @@
+                           "getting surface width"));
+         DAWN_TRY(CheckEGL(egl, egl.QuerySurface(display, mEGLSurface, EGL_HEIGHT, &surfaceHeight),
+                           "getting surface height"));
++#if defined(__SWITCH__)
++        // Mesa's Switch EGL backend sizes the buffers from the native window, but can leave
++        // the EGL surface dimensions unset. Blitting to the reported 0x0 rectangle draws nothing.
++        if (surfaceWidth <= 0 || surfaceHeight <= 0) {
++            uint32_t width = 0;
++            uint32_t height = 0;
++            const uint32_t result =
++                nwindowGetDimensions(GetSurface()->GetAndroidNativeWindow(), &width, &height);
++            if (result != 0 || width == 0 || height == 0) {
++                return DAWN_UNRECOVERABLE_ERROR("Could not read dimensions for the Switch window.");
++            }
++            surfaceWidth = static_cast<EGLint>(width);
++            surfaceHeight = static_cast<EGLint>(height);
++            static std::atomic_flag tracedWindowSize;
++            if (!tracedWindowSize.test_and_set(std::memory_order_relaxed)) {
++                char line[96];
++                std::snprintf(line, sizeof line, "EGL: using native window dimensions %ux%u", width,
++                              height);
++                switch_trace_mark(line);
++            }
++        }
++#endif
+ 
+         const OpenGLFunctions& gl = device->GetGL();
+ 
+@@ -136,7 +160,15 @@
+         DAWN_GL_TRY(gl, DeleteFramebuffers(1, &readFbo));
+     }
+ 
++#if defined(__SWITCH__)
++    DAWN_TRY(CheckEGL(egl, egl.SwapBuffers(display, mEGLSurface), "eglSwapBuffers"));
++    static std::atomic_flag tracedPresent;
++    if (!tracedPresent.test_and_set(std::memory_order_relaxed)) {
++        switch_trace_mark("EGL: first eglSwapBuffers succeeded");
++    }
++#else
+     egl.SwapBuffers(display, mEGLSurface);
++#endif
+ 
+     mTexture->APIDestroy();
+     mTexture = nullptr;

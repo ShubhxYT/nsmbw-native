@@ -1,0 +1,206 @@
+--- a/lib/gfx/common.hpp
++++ b/lib/gfx/common.hpp
+@@ -228,6 +228,9 @@
+ inline constexpr bool UseTextureBuffer = false;
+ inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
+ inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
++#if defined(__SWITCH__)
++inline constexpr uint32_t VertexWordTextureWidth = 1024;
++#endif
+ inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
+ inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
+ inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -125,6 +125,13 @@
+ static ByteBuffer g_storage;
+ static ByteBuffer g_textureUpload;
+ wgpu::Buffer g_vertexBuffer;
++#if defined(__SWITCH__)
++static wgpu::Texture g_vertexWords;
++static wgpu::Texture g_arrayWords;
++constexpr uint32_t VertexWordRowBytes = VertexWordTextureWidth * sizeof(uint32_t);
++static_assert(VertexBufferSize % VertexWordRowBytes == 0);
++static_assert(StorageBufferSize % VertexWordRowBytes == 0);
++#endif
+ wgpu::Buffer g_uniformBuffer;
+ wgpu::Buffer g_indexBuffer;
+ wgpu::Buffer g_storageBuffer;
+@@ -923,12 +930,27 @@
+   };
+   createBuffer(g_uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
+                "Shared Uniform Buffer");
++#if defined(__SWITCH__)
++  const auto createWordTexture = [](uint64_t size, const char* label) {
++    const wgpu::TextureDescriptor descriptor{
++        .label = label,
++        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
++        .dimension = wgpu::TextureDimension::e2D,
++        .size = {VertexWordTextureWidth, static_cast<uint32_t>(size / VertexWordRowBytes), 1},
++        .format = wgpu::TextureFormat::R32Uint,
++    };
++    return g_device.CreateTexture(&descriptor);
++  };
++  g_vertexWords = createWordTexture(VertexBufferSize, "Shared Vertex Words");
++  g_arrayWords = createWordTexture(StorageBufferSize, "Shared Array Words");
++#else
+   createBuffer(g_vertexBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, VertexBufferSize,
+                "Shared Vertex Buffer");
++  createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
++               "Shared Storage Buffer");
++#endif
+   createBuffer(g_indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
+                "Shared Index Buffer");
+-  createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
+-               "Shared Storage Buffer");
+   for (int i = 0; i < g_stagingBuffers.size(); ++i) {
+     const auto label = fmt::format("Staging Buffer {}", i);
+     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
+@@ -944,19 +966,27 @@
+         wgpu::BindGroupLayoutEntry{
+             .binding = 0,
+             .visibility = wgpu::ShaderStage::Vertex,
++#if defined(__SWITCH__)
++            .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
++#else
+             .buffer =
+                 wgpu::BufferBindingLayout{
+                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
+                 },
++#endif
+         },
+         // Storage data buffer
+         wgpu::BindGroupLayoutEntry{
+             .binding = 1,
+             .visibility = wgpu::ShaderStage::Vertex,
++#if defined(__SWITCH__)
++            .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
++#else
+             .buffer =
+                 wgpu::BufferBindingLayout{
+                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
+                 },
++#endif
+         },
+     };
+     const wgpu::BindGroupLayoutDescriptor layoutDesc{
+@@ -965,6 +995,14 @@
+         .entries = layoutEntries.data(),
+     };
+     g_staticBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++#if defined(__SWITCH__)
++    const auto vertices = g_vertexWords.CreateView();
++    const auto arrays = g_arrayWords.CreateView();
++    const std::array entries{
++        wgpu::BindGroupEntry{.binding = 0, .textureView = vertices},
++        wgpu::BindGroupEntry{.binding = 1, .textureView = arrays},
++    };
++#else
+     const std::array entries{
+         wgpu::BindGroupEntry{
+             .binding = 0,
+@@ -975,6 +1013,7 @@
+             .buffer = g_storageBuffer,
+         },
+     };
++#endif
+     const wgpu::BindGroupDescriptor bindGroupDescriptor{
+         .label = "Static bind group",
+         .layout = g_staticBindGroupLayout,
+@@ -1042,6 +1081,10 @@
+   g_uniformBuffer = {};
+   g_indexBuffer = {};
+   g_storageBuffer = {};
++#if defined(__SWITCH__)
++  g_vertexWords = {};
++  g_arrayWords = {};
++#endif
+   // Invalidate outstanding callbacks before releasing their buffers.
+   s_mappingState.reset();
+   g_stagingBuffers.fill({});
+@@ -1222,14 +1265,40 @@
+     bufferOffset += size;
+     return writeSize;
+   };
++#if defined(__SWITCH__)
++  const auto writeWords = [&](ByteBuffer& buf, const wgpu::Texture& texture, uint64_t size) {
++    const auto writeSize = buf.size();
++    if (writeSize > 0) {
++      const auto rows = static_cast<uint32_t>((writeSize + VertexWordRowBytes - 1) / VertexWordRowBytes);
++      const wgpu::TexelCopyBufferInfo source{
++          .layout = {.offset = bufferOffset, .bytesPerRow = VertexWordRowBytes, .rowsPerImage = rows},
++          .buffer = g_stagingBuffers[currentStagingBuffer],
++      };
++      const wgpu::TexelCopyTextureInfo destination{.texture = texture};
++      const wgpu::Extent3D extent{VertexWordTextureWidth, rows, 1};
++      cmd.CopyBufferToTexture(&source, &destination, &extent);
++      buf.release();
++    }
++    bufferOffset += size;
++    return writeSize;
++  };
++#endif
+   g_stagingBuffers[currentStagingBuffer].Unmap();
+   s_mappingState.reset();
+   g_stats.drawCallCount = g_drawCallCount;
+   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
++#if defined(__SWITCH__)
++  g_stats.lastVertSize = writeWords(g_verts, g_vertexWords, VertexBufferSize);
++#else
+   g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
++#endif
+   g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
+   g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
++#if defined(__SWITCH__)
++  g_stats.lastStorageSize = writeWords(g_storage, g_arrayWords, StorageBufferSize);
++#else
+   g_stats.lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
++#endif
+   flush_deferred_texture_writes();  // the static textures this frame loaded (TextureRef::lazy)
+   if constexpr (UseTextureBuffer) {
+     g_stats.lastTextureUploadSize = g_textureUpload.size();
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1015,10 +1015,22 @@
+   // Storage reads for vertex pulling. The GPU compatibility path guards each with a bounds check
+   // that valid data never trips; its presence keeps Adreno's optimizer from the transformation that
+   // scrambles skinned vertices (upstream aurora #202).
++#if defined(__SWITCH__)
++  std::string uniformPre = fmt::format(R"(
++fn load_word(source: u32, word_idx: u32) -> u32 {{
++    let coords = vec2i(i32(word_idx % {0}u), i32(word_idx / {0}u));
++    if (source == 0u) {{
++        return textureLoad(vbuf, coords, 0).r;
++    }}
++    return textureLoad(abuf, coords, 0).r;
++}}
++)", gfx::VertexWordTextureWidth);
++#else
+   std::string uniformPre = webgpu::g_safeVertexFetch
+       ? "\nfn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {\n"
+         "  if (word_idx < arrayLength(p)) {\n    return p[word_idx];\n  }\n  return 0u;\n}\n"
+       : "\nfn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {\n  return p[word_idx];\n}\n";
++#endif
+   std::string uniBufAttrs;
+   std::string texBindings;
+   std::string vtxOutAttrs;
+@@ -2229,6 +2241,19 @@
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentReturnType,
+                                         fragmentReturn);
++#if defined(__SWITCH__)
++  // Keep the same attribute decoders while reading words through integer texture fetches.
++  const auto replace = [&](std::string_view from, std::string_view to) {
++    for (size_t pos = 0; (pos = shaderSource.find(from, pos)) != std::string::npos; pos += to.size()) {
++      shaderSource.replace(pos, from.size(), to);
++    }
++  };
++  replace("var<storage, read> vbuf: array<u32>;", "var vbuf: texture_2d<u32>;");
++  replace("var<storage, read> abuf: array<u32>;", "var abuf: texture_2d<u32>;");
++  replace("ptr<storage, array<u32>>", "u32");
++  replace("&vbuf", "0u");
++  replace("&abuf", "1u");
++#endif
+   if (webgpu::g_shaderDebug != 0) {
+     apply_shader_debug(shaderSource, hash);
+   }

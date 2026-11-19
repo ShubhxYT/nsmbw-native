@@ -1,0 +1,19 @@
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -650,8 +650,15 @@
+   prevPass.resolveNeedsConversion = samplingPlan.needsConversion;
+   prevPass.resolveNeedsShaderSampling = samplingPlan.needsShaderSampling;
+   prevPass.resolveLinearSampling = samplingPlan.usesLinearSampling;
++#if defined(__SWITCH__)
++  // Resolves run after the draw pass and before the following clear on the same encoder.
++  // On Switch GLES, read the EFB directly to avoid synchronizing an extra texture copy.
++  const bool useResolveSnapshot = webgpu::g_backendType != wgpu::BackendType::OpenGLES;
++#else
++  constexpr bool useResolveSnapshot = true;
++#endif
+   prevPass.snapshotColorResolveSource =
+-      !gx::is_depth_format(resolveFormat) && (clearColor || clearAlpha || clearDepth);
++      useResolveSnapshot && !gx::is_depth_format(resolveFormat) && (clearColor || clearAlpha || clearDepth);
+   Vec4<float> uniformSourceRect = sourceRect;
+   float srcW = static_cast<float>(prevPass.targetSize.width);
+   float srcH = static_cast<float>(prevPass.targetSize.height);
