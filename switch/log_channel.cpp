@@ -212,7 +212,8 @@ static void switch_log_earliest() {
                  connected ? "socket" : "file", g_switchTlsResult,
                  static_cast<unsigned long long>(g_switchTlsDelta));
     std::fflush(stderr);
-    install_init_trace();
+    // install_init_trace();  // disabled: the per-constructor trace has served its purpose
+    //                        // and is a suspect in the .bss corruption seen in SystemBridge.
 }
 
 __attribute__((constructor(101))) static void switch_log_earliest_ctor() { switch_log_earliest(); }

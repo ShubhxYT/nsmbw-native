@@ -44,3 +44,30 @@ No behaviour change.
 ## Abseil
 
 See `switch/patches/absl-switch.md` — those edits live in `/tmp/deps/absl`, not here.
+
+## Open bug (2026-11-19): `.bss` corruption during static initialisation
+
+`GuestFlat::Initialize` is fixed, `SystemBridge::Initialize` now gets through `Memory::Init`, low
+memory seeding, `InitializeDataSections` and `InitializePersistentCpuContext`, and reaches the DOL
+constructor loop. It then dies looking up the first constructor (`0x802DD2E0`) in
+`TranslatedFunctionRegistry`.
+
+Measured with probes at `.bss` (see `BSS@appInit` / `BSS@SB` in `init.log`):
+
+```
+BSS@appInit: 00000000 00000000 00000000 00000000     .bss is zeroed by the loader
+BSS@SB:      00000000 00000001 00000001 00000000     +0x40 and +0xC0 became 1
+```
+
+`Registry()::entries` lives at `__bss_start__ + 0xC0` (confirmed with `nm`; its guard variable is at
+`+0x140`, so this is not a guard mix-up), so `_M_start` is literally `1`:
+
+```
+REG: vec=0xe8b70c0 data=0x1 size=5270498306927591953 cap=0
+```
+
+Something between `__appInit` and `SystemBridge::Initialize` writes `1` to `.bss+0x40` and
+`.bss+0xC0`. The init-array trampoline was ruled out by disabling it.
+
+Next step: re-enable the trampoline (`install_init_trace()` in `log_channel.cpp`) and have it record
+the word at `__bss_start__ + 0xC0` after every constructor, to name the one that writes it.

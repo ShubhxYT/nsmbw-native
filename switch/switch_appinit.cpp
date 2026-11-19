@@ -7,6 +7,9 @@
 #include <switch.h>
 
 #include <cstdio>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "switch_tls.h"
 
@@ -38,6 +41,27 @@ extern "C" void __appInit(void) {
 
     // Clock, used for timing and for the crash reporter's timestamps.
     timeInitialize();
+
+    // Diagnostic: .bss must be zero here, before any C++ static initialiser runs. A non-zero word
+    // means function-local statics never get constructed, because their guard variables read as
+    // "already initialised". Written with raw write(2): stdio is not up yet.
+    {
+        extern char __bss_start__[] __attribute__((weak));
+        if (__bss_start__ != nullptr) {
+            volatile unsigned* words = reinterpret_cast<volatile unsigned*>(__bss_start__);
+            char line[128];
+            int n = std::snprintf(line, sizeof line, "BSS@appInit: %08x %08x %08x %08x",
+                                  words[0], words[16], words[48], words[256]);
+            if (n > 0) {
+                int fd = open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd >= 0) {
+                    (void)!write(fd, line, static_cast<size_t>(n));
+                    (void)!write(fd, "\n", 1);
+                    close(fd);
+                }
+            }
+        }
+    }
 }
 
 extern "C" void __appExit(void) {

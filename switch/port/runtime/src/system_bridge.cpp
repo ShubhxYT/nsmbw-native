@@ -315,6 +315,16 @@ extern "C" void switch_trace_mark(const char*);
 
 void SystemBridge::Initialize() {
     switch_trace_mark("SB: enter");
+    {
+        extern char __bss_start__[] __attribute__((weak));
+        if (__bss_start__ != nullptr) {
+            volatile unsigned* words = reinterpret_cast<volatile unsigned*>(__bss_start__);
+            char line[128];
+            std::snprintf(line, sizeof line, "BSS@SB: %08x %08x %08x %08x",
+                          words[0], words[16], words[48], words[256]);
+            switch_trace_mark(line);
+        }
+    }
     const auto memoryConfig = Memory::Config::WiiDefaults();
     Memory::Init(memoryConfig);
     switch_trace_mark("SB: memory init");
@@ -358,17 +368,32 @@ void SystemBridge::Initialize() {
         try {
             funcAddr = Memory::Read32(addr);
         } catch (...) {
+            switch_trace_mark("SB: read threw");
+            continue;
+        }
+        {
+            const std::string line = "SB: read " + Hex32(funcAddr);
+            switch_trace_mark(line.c_str());
+        }
+
+        if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) {
+            switch_trace_mark("SB: skipped (empty slot)");
             continue;
         }
 
-        if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) continue;
-
+        switch_trace_mark(TranslatedFunctionRegistry::FindByAddressPtr(funcAddr) ? "SB: translated found"
+                                                                                : "SB: translated MISSING");
         if (TranslatedFunctionRegistry::FindByAddressPtr(funcAddr)) {
             MkwJmpBuf jumpBuf;
             g_sehJumpTarget = &jumpBuf;
             if (MKW_SETJMP(jumpBuf) == 0) {
+                {
+                    const std::string line = "SB: invoke " + Hex32(funcAddr);
+                    switch_trace_mark(line.c_str());
+                }
                 cpu.gpr[1] = 0x81700000u;
                 InvokeIndirectCpu(funcAddr, &cpu);
+                switch_trace_mark("SB: ctor returned");
                 dolCount++;
             } else {
                 RT_LOG(RT_TAG_RUNTIME) << "SEH Exception caught invoking DOL ctor 0x" << std::hex << funcAddr
