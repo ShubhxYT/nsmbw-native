@@ -15,12 +15,14 @@ the same protocol as nxlink (see nx-hbmenu common/netloader.c):
 """
 import socket
 import struct
+import time
 import sys
 import zlib
 
 PORT = 28280
 STDOUT_PORT = 28281
-IDLE = 5   # the app connects back here after nxlinkStdio()
+IDLE = 5          # stop after this long with nothing arriving
+MAX_LISTEN = 20   # and never hold the terminal longer than this, heartbeat or not   # the app connects back here after nxlinkStdio()
 CHUNK = 8192            # input slice; compressed output stays under the console's 16 KB inflate buffer
 MAX_CHUNK = 16384        # hbmenu rejects a chunk larger than ZLIB_CHUNK (16 KB)
 
@@ -93,8 +95,12 @@ def main() -> int:
         print(f"--- app output (from {addr[0]}) ---", flush=True)
         # The app keeps this socket open for its whole run, so idle time, not EOF, ends the read.
         app.settimeout(IDLE)
+        deadline = time.time() + MAX_LISTEN
         with app:
             while True:
+                if time.time() >= deadline:
+                    print(f"(stopped listening after {MAX_LISTEN}s; the app keeps running on the console)", flush=True)
+                    break
                 try:
                     chunk = app.recv(4096)
                 except socket.timeout:

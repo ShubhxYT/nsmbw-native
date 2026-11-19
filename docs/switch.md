@@ -159,3 +159,27 @@ Measured from the runtime sources, before any of it is ported:
 | sockets | 3 files | only network play; can be stubbed |
 
 Note what is *not* on that list: the graphics backend is a separate problem, and still the cliff.
+
+## Memory on Horizon, measured
+
+A probe built with the same container (a Switch Lite, firmware 20.4.0, launched as an application)
+reported:
+
+```
+process memory: total 3189 MB, used 3185 MB
+alias region:   6144 MB at 0x90e00000
+heap region:    8192 MB at 0x7e1200000
+alloc+write 512 MB: ok
+```
+
+So the guest arena is not the obstacle it looked like:
+
+- ~3.1 GB of memory is available to the process; the runtime needs 88 MB of guest RAM and held about
+  1.1 GB resident on Windows.
+- A 6 GB alias region and an 8 GB heap region give the address space a 4 GiB arena needs.
+- A 512 MB allocation commits and writes without complaint.
+
+The shape of the work is therefore a mapping change, not a redesign: Horizon has **no `mmap` and no
+general reservation API** (the probe would not even compile with `<sys/mman.h>`), so the flat arena
+has to be placed in the alias region with the kernel's memory mapping calls instead of the portable
+mmap path the other platforms use.
