@@ -263,3 +263,25 @@ frame 60 ... frame 720
 720 frames is ~12 seconds at 60 Hz, so the loop paces correctly. Two linker details worth keeping:
 the Makefile needs `-ldeko3d` **before** `-lnx` (static libraries resolve left to right, and deko3d
 calls libnx's `nv*` services), and `nwindowSetDimensions` is what pins the swapchain to 720p.
+
+## The build must split compilers
+
+devkitA64 ships **GCC**, and the runtime's own headers use **Clang builtins** — the same problem the
+translated code has:
+
+```
+error: '__builtin_rotateleft32' was not declared in this scope
+```
+
+So the Switch build splits the two roles:
+
+| Role | Tool | Why |
+|---|---|---|
+| Compile | Clang 19, `--target=aarch64-none-elf`, devkitA64 sysroot | the sources are written for Clang extensions |
+| Link / package | devkitPro's driver + `switch.specs` + `elf2nro` | libnx's startup and the `.nro` container |
+
+Compiling with Clang and linking with the devkitPro driver is ABI-compatible and is the only
+combination that builds both the runtime and the translated game code.
+
+Also needed in the Makefile: `-fexceptions -frtti` (the runtime uses C++ exceptions, which
+devkitPro's template disables), and `-ldeko3d` **before** `-lnx`.
