@@ -132,3 +132,33 @@ Two lessons from it:
 The real fault is `std::system_error` with `ENOSYS` ("Function not implemented") escaping into guest
 code, which has no handler, so it becomes `std::terminate`. Adding a `catch(std::exception)` around
 `OSSuspendThread`'s body did not change it, which confirms the throw happens elsewhere.
+
+## Symbolized host backtrace at the throw (definitive)
+
+Converting the turn addresses with the image base subtracted (`0x8500000`) makes the throwing path
+explicit:
+
+```
+__wrap___cxa_throw
+std::__throw_system_error(int)
+std::_Function_handler<void(), std::call_once<...>
+(anonymous namespace)::AdvanceRetrace
+(anonymous namespace)::AdvanceDueRetraces
+SelectThread_801a9c08
+OSSuspendThread_HLE_801aa6a8
+InvokeDirectCpu<0x801B5B00>        (guest func_800C9F90 called OSSuspendThread)
+func_800C9F90
+```
+
+So **`std::call_once` throws `std::system_error` with `ENOSYS`**, from the retrace scheduler, and the
+guest has no handler so it becomes `std::terminate`.
+
+`pthread_once` is present in both libnx (`pthread.c`) and libsysbase; defining one in our objects gives
+`multiple definition of 'pthread_once'`, so the fault is inside the existing implementation or in how
+`__gthread_once` reports it — not a missing symbol. Guarding `OSSuspendThread`'s body with
+`catch(std::exception)` does **not** help either: the throw happens further down, inside the retrace
+scheduling path reached from it.
+
+Next: determine what libnx's `pthread_once` returns here (log its result before libstdc++ maps it to
+`system_error`), and whether a stale `errno` of `ENOSYS` (our `pipe()` shim returns -1 without setting
+errno) is being turned into the exception.

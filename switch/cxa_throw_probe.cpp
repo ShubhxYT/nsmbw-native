@@ -8,11 +8,38 @@
 #include <exception>
 #include <string>
 #include <typeinfo>
+#include <unwind.h>
 
 #include "recomp_mod_loader.h"
 
 extern "C" void switch_trace_mark(const char*);
 extern "C" void __real___cxa_throw(void* thrown, void* type, void (*destructor)(void*));
+
+namespace {
+// Collects host return addresses so a throwing call can be named instead of inferred from the guest
+// dispatch address (which is only the last Invoke*Cpu, not the throw site).
+struct TraceState {
+    char text[400];
+    int length = 0;
+    int frames = 0;
+};
+
+_Unwind_Reason_Code trace_frame(_Unwind_Context* context, void* argument) {
+    auto* state = static_cast<TraceState*>(argument);
+    const uintptr_t address = static_cast<uintptr_t>(_Unwind_GetIP(context));
+    if (address == 0 || state->length > 300) {
+        return _URC_NO_REASON;
+    }
+    const int written = std::snprintf(state->text + state->length,
+                                      sizeof(state->text) - static_cast<size_t>(state->length),
+                                      " %llx", static_cast<unsigned long long>(address));
+    if (written > 0) {
+        state->length += written;
+    }
+    ++state->frames;
+    return state->frames >= 14 ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+} // namespace
 
 extern "C" void __wrap___cxa_throw(void* thrown, void* type, void (*destructor)(void*)) {
     const auto* info = static_cast<const std::type_info*>(type);
@@ -30,6 +57,13 @@ extern "C" void __wrap___cxa_throw(void* thrown, void* type, void (*destructor)(
                       static_cast<unsigned>(RecompMod::CurrentTranslatedExecutionAddress()));
     }
     switch_trace_mark(line);
+    {
+        TraceState state;
+        _Unwind_Backtrace(&trace_frame, &state);
+        char trace[420];
+        std::snprintf(trace, sizeof trace, "TRACE%s", state.text);
+        switch_trace_mark(trace);
+    }
     __real___cxa_throw(thrown, type, destructor);
 }
 
