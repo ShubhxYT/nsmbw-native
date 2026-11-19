@@ -285,3 +285,20 @@ combination that builds both the runtime and the translated game code.
 
 Also needed in the Makefile: `-fexceptions -frtti` (the runtime uses C++ exceptions, which
 devkitPro's template disables), and `-ldeko3d` **before** `-lnx`.
+
+## Switch belongs on Aurora's "PC" path
+
+`aurora-main/include/dolphin/types.h` defines `u32`, `BOOL` and the rest only under `TARGET_PC`;
+without it the Switch fell into the 32-bit Dolphin typedef branch, where `u32` is `unsigned long`
+and `BOOL` does not exist at all. The runtime is written against the 64-bit path, so the Switch build
+defines **both** `__SWITCH__` and `TARGET_PC`.
+
+Evidence, compiling one file both ways:
+
+```
+-D__SWITCH__               -> 9 errors
+-D__SWITCH__ -DTARGET_PC   -> 0 errors
+```
+
+That one define is the difference between the runtime being a pile of typedef conflicts and being
+ordinary portable C++.
