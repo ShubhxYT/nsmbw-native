@@ -78,22 +78,28 @@ bool Open() {
     // BSD sockets need the service initialised before the first socket() call.
     socketInitializeDefault();
 
-    int fd = connect_log_channel();
-    if (fd < 0) {
-        fd = open_log_file();
-        if (fd < 0) {
-            return false;
+    // Write to the SD card first: the file is the reliable channel, and it must exist the moment this
+    // function runs. The socket is a bonus on top.
+    const int fileFd = open_log_file();
+    if (fileFd >= 0) {
+        dup2(fileFd, STDOUT_FILENO);
+        dup2(fileFd, STDERR_FILENO);
+        if (fileFd > STDERR_FILENO) {
+            close(fileFd);
         }
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        std::setvbuf(stderr, nullptr, _IONBF, 0);
     }
 
-    dup2(fd, STDOUT_FILENO);
-    dup2(fd, STDERR_FILENO);
-    if (fd > STDERR_FILENO) {
-        close(fd);
+    // Then try to mirror to the development machine; failure only means no live stream.
+    const int sockFd = connect_log_channel();
+    if (sockFd >= 0) {
+        dup2(sockFd, STDOUT_FILENO);
+        dup2(sockFd, STDERR_FILENO);
+        if (sockFd > STDERR_FILENO) {
+            close(sockFd);
+        }
     }
-    // Unbuffered: a crash must not swallow the last lines.
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
-    std::setvbuf(stderr, nullptr, _IONBF, 0);
     return true;
 }
 
@@ -101,3 +107,23 @@ bool Open() {
 
 // Runs before main(): the runtime writes to stdio during static initialisation in places.
 __attribute__((constructor)) static void switch_open_log_channel() { SwitchLog::Open(); }
+
+// Opens the log channel before any other static initialiser runs. Constructor priority 101 sorts ahead
+// of every default-priority (65535) initialiser, and .preinit_array runs before even those, so a crash
+// inside a global constructor still leaves evidence of how far the process got.
+static void switch_log_earliest() {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+    const bool connected = SwitchLog::Open();
+    std::fprintf(stderr, "nsmbw: reached C++ runtime (log %s)\n",
+                 connected ? "socket" : "file");
+    std::fflush(stderr);
+}
+
+__attribute__((constructor(101))) static void switch_log_earliest_ctor() { switch_log_earliest(); }
+
+__attribute__((section(".preinit_array"), used))
+static void (*g_switch_preinit)(void) = switch_log_earliest;

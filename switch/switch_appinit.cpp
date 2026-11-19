@@ -21,11 +21,8 @@ extern "C" void __appInit(void) {
     appletInitialize();
 
     // Input. Denied by some NPDMs; the game still renders without a controller.
-    const Result hid = hidInitialize();
-    if (R_FAILED(hid)) {
-        std::fprintf(stderr, "[switch] hidInitialize failed: 0x%x (no controller input)\n", hid);
-        std::fflush(stderr);
-    }
+    // No stdio here: this runs inside crt0, before libc's streams exist. Touching stderr aborts.
+    hidInitialize();
 
     // Clock, used for timing and for the crash reporter's timestamps.
     timeInitialize();
@@ -39,3 +36,10 @@ extern "C" void __appExit(void) {
     fsExit();
     smExit();
 }
+
+// libnx applies the module's dynamic relocations itself (__nx_dynamic -> _dynProcessRela/Relr). That
+// walker faults on our image, dying before main(). The system loader has already relocated an
+// installed title, so make the library's pass a no-op and let execution continue.
+// __nx_dynamic is NOT overridden any more: libnx must apply the module's relocations. The reason it
+// used to fault is that --spare-dynamic-tags=0 leaves no room for the DT_NULL terminator, so the tag
+// loop ran past the end of .dynamic. The link now passes -z spare-dynamic-tags=1.
