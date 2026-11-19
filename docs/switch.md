@@ -225,3 +225,22 @@ Which leaves exactly two walls for the whole port:
 
 1. **SDL3** — no Switch backend; replaced by a libnx platform layer (window, pad, audio).
 2. **Guest memory** — Horizon has no `mmap`; the flat arena must be mapped into the alias region.
+
+## The guest arena, implemented
+
+`switch/patches/guest-memory.patch` is the Horizon memory model, and `guest_flat_memory.cpp` now
+compiles clean for `aarch64-none-elf`:
+
+- **No `mmap`**: Horizon has none, so the arena is one contiguous 512 MB heap block covering the range
+  the game addresses (MEM1 at `0x80000000`, MEM2 at `0x90000000`), presented as the flat base.
+- **No fault handler**: the kernel owns the exception path, so `g_requiresCheckedAccess` is forced on
+  and guest access is bounds-checked instead of protected by page permissions. The runtime already
+  had this mode for hosts with unusual page sizes.
+- **MMIO needs no storage**: the checked accessors divert the `0xCC000000` register window, so the
+  arena does not have to span it.
+- `sigjmp_buf` again: newlib has no such type, so `system_bridge.h` uses plain `jmp_buf`.
+
+The POSIX mapping calls the file still contains are compiled out on Switch through small shims; they
+are unreachable in checked mode.
+
+That leaves the runtime with **one** wall: SDL.
