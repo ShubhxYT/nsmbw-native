@@ -44,7 +44,8 @@ for unit in "${units[@]:-}"; do
             base=$(basename "$unit" .cpp)
             # shellcheck disable=SC2086
             $CXX -std=gnu++20 -D__SWITCH__ -fPIE -c -O2 -fexceptions -frtti \
-                -isystem $DEVKITPRO/libnx/include "$unit" -o "$OBJ/$base.o"
+                -I/src/switch -isystem $DEVKITPRO/libnx/include -isystem /deps/SDL/include \
+                -isystem /src/runtime/include "$unit" -o "$OBJ/$base.o"
             ;;
         runtime/src/*)
             rel=${unit#runtime/src/}

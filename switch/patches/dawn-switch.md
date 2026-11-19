@@ -303,3 +303,25 @@ carries neither libnx headers nor `switch.h`.
 Next: read what devkitPro's `egl_switch.c` (inside `libEGL.a`) actually accepts as a native window -
 it may require `eglCreatePlatformWindowSurfaceEXT`, a configured NWindow, or a different struct than
 `NWindow*`.
+
+## ROOT CAUSE of EGL_BAD_NATIVE_WINDOW: the default NWindow is invalid
+
+Logging `nwindowIsValid()` next to the handle settles it:
+
+```
+SDL window: 854x480, native NWindow 0xf4169c8 valid=0
+EGL: surface=0x0  err=0x300b (EGL_BAD_NATIVE_WINDOW)
+```
+
+`nwindowGetDefault()` returns a pointer, but the object behind it is **not a valid NWindow**, so
+Mesa's `switch_create_window_surface` (which calls `nwindowIsValid` before anything else) rejects it.
+Dawn and Aurora are both innocent - the handle is passed through correctly.
+
+libnx documents that `nwindowGetDefault()` initialises VI services and creates the window from a
+`ViLayer` "automatically during application startup, before main is called". This port overrides
+`__appInit`, so that startup path is the likely casualty - the same class of problem as the NPDM
+service table.
+
+Next: build the NWindow explicitly (`viInitialize()` +
+`appletCreateManagedDisplayLayer()`/`viCreateLayer()` + `nwindowCreateFromLayer()`) and have both the
+SDL layer and Aurora's surface descriptor use that handle instead of `nwindowGetDefault()`.

@@ -472,7 +472,9 @@ SDL_Window* SDL_CreateWindowWithProperties(SDL_PropertiesID props) {
     return nullptr;
   }
   nwindowSetDimensions(window->native, kWindowWidth, kWindowHeight);
-  SDL_Log("SDL window: %dx%d, native NWindow %p", window->width, window->height, window->native);
+  // EGL rejects this handle with EGL_BAD_NATIVE_WINDOW, so record whether libnx considers it valid.
+  SDL_Log("SDL window: %dx%d, native NWindow %p valid=%d", window->width, window->height,
+          window->native, static_cast<int>(nwindowIsValid(window->native)));
   return window;
 }
 
