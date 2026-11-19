@@ -132,6 +132,59 @@ readelf -d: last entry 0x0 (NULL)   ← must be DT_NULL
 
 ---
 
+## 5b. The two root causes found on 2026-11-19 (both were in this port, not the game)
+
+### (a) TLS is never bootstrapped: every `thread_local` dereferences null
+
+An NSO carries **no `PT_TLS`**, and **nothing in libnx ever writes `tpidr_el0`** — every libnx routine
+reads `tpidrro_el0`, which is the kernel-provided IPC command buffer, not C thread-local storage. So
+the register stays 0 and the first access to any `thread_local` reads `0 + tls_offset`.
+
+toml11 caches its parser `spec` in a `thread_local`, so `toml::detail::syntax::ws` faulted at
+`0xCA0`. Atmosphère reported every one of these as **`Fault Address: 0`**, which is why it looked
+like a null dereference for so long. Ryujinx names it directly:
+
+```
+InvalidAccessHandler: Invalid memory access at virtual address 0x0000000000000CA0
+```
+
+`switch.ld` reserves `.main.tls` (exactly `.tdata` + `.tbss`) and exports `__tls_start`/`__tls_end`
+and `__tdata_lma`, but the CRT step that copies `.tdata` there and points the register at it is
+missing. Worse, the linker computes TLS offsets against a base that is **not** `__tdata_lma` (with no
+`PT_TLS` the base is arbitrary — it measured `__tdata_lma - 0x10`), so pointing at `.tdata` blindly
+still reads the wrong bytes.
+
+`switch/switch_tls.h` solves it by self-calibration rather than a hard-coded delta: it sets
+`tpidr_el0` to `__tdata_lma - delta` and walks `delta` back in 8-byte steps until a sentinel
+`thread_local` reads back its initial value. That uses the compiler's own addressing, so it stays
+correct whatever the linker does. **The sentinel read must live in a `noinline` function** — otherwise
+the compiler hoists the `mrs`/`add` out of the loop, computes `tpidr + 0x10` while `tpidr` is still 0,
+and faults at `0x10` before calibration starts.
+
+Called first thing from `__appInit`. Verified in a 300 KB probe: `result=1 delta=0x10 read=0x4d2
+thread_local ok`.
+
+### (b) Re-PIC-ing *all* of `.rodata` in devkitPro's libraries breaks newlib
+
+The read-only-relocation fix (§5.3) originally renamed **every** `.rodata*` section in libstdc++,
+libstdc++fs, libc, libm, libgcc and libsysbase to `.data.rel.ro*`. That silently destroyed newlib's
+locale tables. The symptom was subtle and misleading — literals still printed, but every conversion
+vanished:
+
+```
+re-PIC (all):   B int=      C str=[      D char=     E setlocale null   F newlocale null
+stock libs:     B int=42    C str=[abc]  D char=z    E setlocale ok     F newlocale ok
+```
+
+`setlocale`/`newlocale` returning NULL and `std::locale::classic()` killing the process follow from
+the same damage, and it is what made `<iostream>`'s global initialiser fatal.
+
+The rewrite must be **surgical**: rename only a section that a relocation actually targets, i.e. the
+`<section>` named by each `.rela.<section>` entry. On these libraries that is 821 sections in
+libstdc++, 24 in libstdc++fs, **9 in libc**, 1 in libsysbase, 0 in libm/libgcc — versus hundreds in
+libc for the blanket rewrite. With the targeted version the probes match stock exactly *and* the
+link still reports `RODATA RELOCATIONS: 0 of 38921`.
+
 ## 6. Current build pipeline
 
 Order matters; scripts are in `switch/`:
@@ -159,35 +212,21 @@ Horizon has no `pipe(2)`.
 
 ## 7. Where it currently stops
 
-* `boot.log` proves the preinit constructor runs.
-* No new Atmosphère crash report is produced for this build, and no further log lines appear, so the
-  failure is in a **static initialiser** (after the priority-101 logger) or very early in `main()`.
-* Next instrument: add `fprintf(stderr, …)` markers between the runtime's initialisers, or run the NSP
-  under **Ryujinx** on the Mac (`~/Documents/Ryujinx/Ryujinx/Ryujinx.app`, keys and firmware already
-  installed, `~/Library/Application Support/Ryujinx/games`) to get a stack trace without the console.
+Static initialisation now runs **77 of 122 constructors** (it was 1 before TLS and the library fix).
+It stops inside `_GLOBAL__sub_I__ZN16settings_overlay25InitializeRuntimeSettingsEv`, the initialiser
+for `settings_overlay.cpp`, which reads `RuntimeConfigFile::Get()` about 25 times.
 
-## 7b. Local testing with Ryujinx (no console needed)
+Diagnostics in place for the next step:
 
-The Mac already has Ryujinx with the console's own keys and firmware:
-
-```
-app      ~/Documents/Ryujinx/Ryujinx/Ryujinx.app
-run      ~/Documents/Ryujinx/Ryujinx/Ryujinx.app/Contents/MacOS/Ryujinx <file.nsp>
-keys     ~/Library/Application Support/Ryujinx/system/{prod.keys,title.keys}
-data     ~/Library/Application Support/Ryujinx/
-```
-
-Two things matter when running a homebrew NSP there:
-
-1. **The emulated SD card is a real directory**: `~/Library/Application Support/Ryujinx/sdcard/`.
-   `sdmc:/switch/nsmbw/...` maps to `…/Ryujinx/sdcard/switch/nsmbw/…`. It must be created by hand:
-   `Config.toml` plus `sys/` and `files/` from the extracted disc. Without the directory, the app's
-   `fopen("sdmc:/switch/nsmbw/boot.log")` fails and you get no logs at all.
-2. Guest stdio is logged with a `|G|` prefix in Ryujinx's output (guest logging is enabled in
-   `Config.json`), so `nsmbw: reached C++ runtime` should appear there. Ryujinx also keeps the window
-   open after a guest crash, so "the window is up" is not proof the app is alive.
-
-This is the fastest iteration loop: no install, no netloader, no button presses, full stack traces.
+* `sdmc:/switch/nsmbw/init.log` — one line per `.init_array` slot, written by a trampoline that
+  `log_channel.cpp` installs over the array from `.preinit_array`; the last index is the initialiser
+  that never returned. Slot 77 is the current stop.
+* `sdmc:/switch/nsmbw/boot.log` — the preinit line, now including `tls=<result> delta=<n>`.
+* `switch/probe*.cpp` + `switch/build-probe.sh` — 300 KB probe NSPs that reproduce runtime-level
+  problems without the 64 MB package. `build-probe.sh <name> <src> [defines]`, `STOCK=1` to link
+  devkitPro's untouched libraries for an A/B test. This is how both root causes were found.
+* `switch/rebuild.sh [units...] --pack` — incremental rebuild: recompile named units, relink, verify,
+  package. Roughly two minutes.
 
 ## 8. Known remaining work (after the boot fix)
 

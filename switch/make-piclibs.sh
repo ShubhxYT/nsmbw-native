@@ -1,13 +1,19 @@
 #!/bin/bash
 # Derive PIC versions of devkitPro's prebuilt libraries.
 #
-# devkitPro builds its libraries non-PIC because homebrew NROs load at a fixed base. An NSP title is
-# loaded with ASLR and needs relocations, and a relocation whose target lives in .rodata fails: the NSO
-# loader maps that section read-only, and Atmosphère reports the resulting permission fault as
-# "Fault Address 0". Every such relocation has to move to a writable section, so each .rodata* section
-# in these archives is renamed to .data.rel.ro*.
+# Why: an NSP title is loaded with relocations, and a relocation whose target lives in .rodata
+# fails, because the NSO loader maps that section read-only. Atmosphère reports the resulting
+# permission fault as "Fault Address 0", which looks like a null dereference.
 #
-# The section name must be extracted by pattern: readelf right-aligns the section index, so the name is
+# The rewrite must be surgical. Renaming every .rodata* section in libc breaks newlib: printf then
+# drops every conversion (%d, %s and %c all print nothing while literals still appear),
+# setlocale/newlocale return NULL, and libstdc++'s iostream global initialiser kills the process
+# before main(). Only a section that a relocation actually targets needs to become writable, so this
+# renames exactly the section named by each .rela.<section> entry and nothing else. On the libraries
+# used here that is 821 sections in libstdc++, 24 in libstdc++fs, 9 in libc, 1 in libsysbase and
+# none in libm/libgcc.
+#
+# Section names are extracted by pattern: readelf right-aligns the section index, so the name is
 # field $2 for some objects and $3 for others.
 set -euo pipefail
 
@@ -25,20 +31,26 @@ pic() {
     echo "== $libname =="
     rm -rf /tmp/px && mkdir -p /tmp/px && cd /tmp/px
     $AR x "$lib"
+    local renamed=0
     for o in *.o; do
-        local rosecs
-        rosecs=$($READELF -SW "$o" 2>/dev/null | grep -oE "\.rodata[^ ]*" | sort -u)
-        if [ -z "$rosecs" ]; then
+        # Every .rela.<name> section means this object relocates the section <name>.
+        local targets
+        targets=$($READELF -SW "$o" 2>/dev/null | grep -oE '\.rela\.[^ ]+' |
+                  sed 's/^\.rela//' | sort -u | grep -E '^\.rodata' || true)
+        if [ -z "$targets" ]; then
             cp "$o" "$OUT/$libname-$o"
             continue
         fi
         local args=""
-        for sec in $rosecs; do
-            # alloc + load keep the contents, data makes it writable.
+        for sec in $targets; do
+            # alloc + load keep the contents; data makes the section writable.
             args="$args --rename-section $sec=.data.rel.ro${sec#.rodata},alloc,load,data"
+            renamed=$((renamed + 1))
         done
+        # shellcheck disable=SC2086
         $OBJCOPY $args "$o" "$OUT/$libname-$o"
     done
+    echo "  $renamed read-only relocation targets made writable"
     $AR rcs "$OUT/${libname}_pic.a" "$OUT"/$libname-*.o
 }
 
