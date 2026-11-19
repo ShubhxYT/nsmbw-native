@@ -1,0 +1,2 @@
+# Switch port configuration. The extracted game goes beside this file.
+dvd_root = "sdmc:/switch/nsmbw/game"

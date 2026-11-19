@@ -22,7 +22,7 @@ import zlib
 PORT = 28280
 STDOUT_PORT = 28281
 IDLE = 5          # stop after this long with nothing arriving
-MAX_LISTEN = 20   # and never hold the terminal longer than this, heartbeat or not   # the app connects back here after nxlinkStdio()
+MAX_LISTEN = 120  # and never hold the terminal longer than this, heartbeat or not   # the app connects back here after nxlinkStdio()
 CHUNK = 8192            # input slice; compressed output stays under the console's 16 KB inflate buffer
 MAX_CHUNK = 16384        # hbmenu rejects a chunk larger than ZLIB_CHUNK (16 KB)
 
@@ -52,7 +52,7 @@ def main() -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("0.0.0.0", STDOUT_PORT))
     listener.listen(1)
-    listener.settimeout(3)   # a push should feel instant; no log is a normal outcome
+    listener.settimeout(180) # a 100 MB .nro takes a while to load before main() runs
 
     with socket.create_connection((host, PORT), timeout=10) as sock:
         print(f"connected; sending {len(payload)} bytes as {name.decode()}", flush=True)

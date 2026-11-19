@@ -8,6 +8,71 @@ An NSP needs a Horizon OS build of the game; there is nothing to convert from th
 binaries. This page records what was proven, what the remaining work is, and how other ports of
 comparable games did it.
 
+## Where the port stands now
+
+| Layer | State | Evidence |
+|---|---|---|
+| Runtime sources | 124 of 128 objects build for `aarch64-none-elf` | four files are platform exclusions (`discord_presence`, `net_socket`, `guest_flat_memory_macos`, `hd_texture_pack`) |
+| Vendored libraries | Crypto++ 202, ImGui, pugixml, xxhash, sqlite, zlib, libpng, fmt, abseil 151, mbedtls 109 | all compiled for the Switch toolchain |
+| Aurora renderer | 79 objects, 0 errors | GX implementation, WebGPU layer, Dawn binding all compile |
+| Dawn | `libwebgpu_dawn.a`, 35.7 MB | OpenGL ES backend, built with `DAWN_ENABLE_PIC=OFF` |
+| Translated game | 72 of 72 shards | plus the embedded DOL/REL section blobs |
+| Link | `wiicompiled.elf`, 112 MB → `.nro` 103 MB | zero undefined symbols |
+| Packaging | `0100000000004e53.nsp`, 63.5 MB | program + meta + cmnt NCAs via hacBrewPack |
+
+### The rendering path
+
+Aurora is written against WebGPU, so the port needs Dawn. Dawn's OpenGL ES backend is the only
+option that works on Horizon today, and GLES is proven on the console (a Mesa triangle draws). Three
+changes make that work:
+
+1. `src/utils/platform.h` — Dawn hard-errors on unknown platforms; `__SWITCH__` is now a POSIX-shaped
+   platform.
+2. `Surface.cpp` and `SwapChainEGL.cpp` — the Android native-window descriptor carries libnx's
+   `NWindow*`, which the Switch EGL implementation accepts as an EGL native window. Aurora's
+   `BackendBinding.cpp` returns that descriptor under `__SWITCH__`.
+3. `SystemEvent.cpp` — Horizon has no `pipe(2)`, so event waits degrade to polling instead of
+   aborting.
+
+### Horizon gaps that needed real code, not flags
+
+- **Anonymous mappings.** Abseil's `ABSL_HAVE_MMAP` lists only desktop OSes, so `LowLevelAlloc` and
+  everything above it (`GraphCycles`, `PerThreadSem`, `Mutex`) compiled to empty objects. Allowing
+  `__SWITCH__` plus `switch/absl_horizon.cpp` (page-aligned allocations) fixed 14 undefined symbols.
+- **`struct tm` members.** `tm_gmtoff`/`tm_zone` are opt-in in newlib and the macros must precede
+  `<time.h>`, which is why `switch/include/switch_posix.h` sets them at the very top.
+- **Crypto++ RNG.** `AutoSeededRandomPool` only exists where `OS_RNG_AVAILABLE` is set, so ES
+  signature generation had no RNG at all. `wii_es_crypto.h` now has a Switch pool.
+- **C linkage in an unnamed namespace.** `system_bridge.cpp` declared the guest symbol table inside
+  `namespace { }`; a C-linkage name there still has internal linkage, so it could never resolve
+  under GCC. Clang accepted it.
+- **`return {a, b};` on a vector type.** GCC rejects it for `vector_size` types, so
+  `MkwStateFreeResult2` is a 16-byte aggregate with `operator[]` instead.
+
+### SD card layout
+
+```
+sdmc:/switch/nsmbw/
+    Config.toml          dvd_root = "sdmc:/switch/nsmbw/game"
+    game/                the extracted disc: sys/main.dol, sys/fst.bin, files/...
+    nsmbw.nsp            the installable package
+    boot.log             written by the app when the log socket is unreachable
+```
+
+`runtime_config.h` returns `sdmc:/switch/nsmbw` as the application data directory under `__SWITCH__`,
+so config, user data and the game all live beside the binary.
+
+### Why the `.nro` route cannot work
+
+The image is 85 MB of `.text`, and 83.5 MB of that is the translated game itself. hbmenu's loader
+crashes on it (Atmosphère report: `hbloader` at `nx-hbmenu + 0xb1f8c`) in both applet and application
+mode. That is why the deliverable is an NSP: an installed title runs in the application memory pool
+and never goes through hbmenu.
+
+The NPDM must declare `pool_partition: 1` and `process_category: 1`. The homebrew template's default
+(`0`) selects the system pool, which is smaller than the 512 MB guest arena the runtime maps at
+startup.
+
 ## What phase 0 proves
 
 `switch/phase0` is the smallest libnx app that proves the toolchain end to end: it links against
