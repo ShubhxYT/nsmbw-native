@@ -49,7 +49,9 @@ int connect_log_channel() {
 
     // The host listener is started before the push, but the console spends a while loading a large
     // .nro before main() runs; retry for a few seconds instead of failing on the first attempt.
-    for (int attempt = 0; attempt < 20; ++attempt) {
+    // Two attempts only: with no listener running, each refused connect costs the host's full
+    // timeout, and twenty of them delay startup by ~50 s - long enough to look like a hang.
+    for (int attempt = 0; attempt < 2; ++attempt) {
         const int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
             break;

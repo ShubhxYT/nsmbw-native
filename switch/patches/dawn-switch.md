@@ -245,3 +245,40 @@ setting errno (`pipe`, `waitpid`, ...).
 Next: symbolize frame 2 of the `SETRACE` capture - recompute the image base from the running binary
 first, since one frame landed outside the assumed text range - to name the immediate caller of
 `__throw_system_error`.
+
+## SOLVED: `pthread_detach` returns ENOSYS, and that was the crash
+
+Wrapping `pthread_detach` gave the answer in one run:
+
+```
+PTHREAD pthread_detach rc=88
+THROW_SYSTEM_ERROR code=88
+```
+
+Horizon's `pthread_detach` is unimplemented (88 = newlib `ENOSYS`), and libstdc++ turns that into
+`std::system_error`, which the guest cannot catch - hence "unhandled C++ exception" killed the retrace
+scheduler. `__wrap_pthread_detach` now reports success and lets the kernel own the thread.
+
+Result: **zero `THROW_SYSTEM_ERROR`**, `init.log` grows from 1 line to 18,085, and guest dispatch runs:
+
+```
+II> 801dbce0
+II< resolved
+```
+
+Also fixed while chasing it: the log channel retried the host for 20 attempts, and with no listener
+each refused connect costs the host's full timeout, delaying startup by ~50 s and making runs look
+hung. It now tries twice.
+
+## Next blocker: EGLSurface creation
+
+The renderer now initialises and reaches swapchain setup:
+
+```
+[aurora::gpu] Using surface format RGBA8Unorm, present mode Immediate
+[aurora::gpu] Render target 640x528 for a 854x480 surface
+[aurora::gpu] WebGPU device was lost (Unknown: Couldn't create an EGLSurface for [Surface "Surface"].
+```
+
+`eglCreateWindowSurface` needs the NWindow as its native window; the same class of problem as the
+`dlopen` fix, one layer further out.

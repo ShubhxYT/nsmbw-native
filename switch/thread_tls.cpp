@@ -113,3 +113,31 @@ extern "C" int __wrap_pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex
     }
     return result;
 }
+
+// std::thread::join()/detach() throw std::system_error on a non-zero pthread result, and join was the
+// one primitive not yet instrumented. The escaping exception is a plain std::system_error (the throw
+// probe reports "St12system_error", not "filesystem_error"), so the thread API is the remaining
+// candidate.
+extern "C" int __real_pthread_join(pthread_t thread, void** value);
+extern "C" int __real_pthread_detach(pthread_t thread);
+
+extern "C" int __wrap_pthread_join(pthread_t thread, void** value) {
+    const int result = __real_pthread_join(thread, value);
+    if (result != 0) {
+        LogPthreadFailure("pthread_join", result);
+    }
+    return result;
+}
+
+extern "C" int __wrap_pthread_detach(pthread_t thread) {
+    const int result = __real_pthread_detach(thread);
+    if (result != 0) {
+        // Horizon's pthread_detach is unimplemented and returns ENOSYS (88). libstdc++ turns that
+        // into std::system_error, which the guest cannot catch - it killed the retrace scheduler with
+        // "unhandled C++ exception". Detaching only governs reaping, so report success and let the
+        // kernel own the thread.
+        LogPthreadFailure("pthread_detach (treated as success)", result);
+        return 0;
+    }
+    return result;
+}
