@@ -1,7 +1,8 @@
 # Nintendo Switch
 
-Status: **phase 0 done** — the toolchain builds a `.nro` that runs on the console. Nothing of the
-game runs yet.
+Status: **phase 0 done and confirmed on hardware** (Switch Lite, firmware 20.4.0): the toolchain
+builds a `.nro` that runs, and deko3d draws. The translated game's code also compiles for Horizon.
+Nothing of the game runs yet.
 
 An NSP needs a Horizon OS build of the game; there is nothing to convert from the macOS/Windows/iOS
 binaries. This page records what was proven, what the remaining work is, and how other ports of
@@ -75,3 +76,48 @@ need a second unit later. There is no remote-control bridge on Horizon — the u
 
 `switch-port` holds Switch work only; the main branch remains the working macOS/Windows/iOS kit.
 Nothing here changes those builds.
+
+## What has been proven on the console
+
+| Claim | Evidence |
+|---|---|
+| devkitA64 + libnx build and run | `nsmbw-check.nro` printed firmware 20.4.0, handheld, pad ok |
+| deko3d works on this firmware | the devkitPro deko3d sample drew its triangle (shaders from RomFS) |
+| textures, depth, buffers | `deko-examples.nro` (textured cube, teapot, multisampling) built and installed |
+| **the translated game compiles for Horizon** | one shard built to a 2 MB object with Clang, `--target=aarch64-none-elf` |
+
+### The translated code needs Clang, not devkitA64's GCC
+
+devkitA64 ships GCC, and the translator's output uses Clang extensions (`__builtin_rotateleft32`,
+`__attribute__((ext_vector_type))`). GCC fails on both. Clang can target the Switch sysroot:
+
+```bash
+D=/opt/devkitpro/devkitA64/aarch64-none-elf
+clang++ --target=aarch64-none-elf -std=gnu++20 -D__SWITCH__ -fPIE \
+  --sysroot=$D \
+  -isystem $D/include/c++/15.2.0 \
+  -isystem $D/include/c++/15.2.0/aarch64-none-elf \
+  -isystem $D/include/c++/15.2.0/backward \
+  -isystem $D/include \
+  -I/opt/devkitpro/libnx/include -I<repo>/runtime/include -I<repo>/runtime/src \
+  -c <repo>/generated/build_shards/base_common/shard_*.cpp
+```
+
+The include order matters: the C++ headers must come **before** `$D/include`, or `#include_next`
+cannot find newlib's `stdlib.h`.
+
+One source change was needed: `runtime/include/system_bridge.h` uses `sigjmp_buf`, which newlib does
+not have. On `__SWITCH__` it uses plain `jmp_buf`, which is the whole contract there anyway — the
+kernel owns the exception path, so a SIGSEGV handler is not available to homebrew.
+
+`nsmbw-switch-clang` (see `switch/Dockerfile.clang`) adds Clang and LLD to the toolchain image.
+
+## The platform layer cannot be SDL
+
+SDL3 has **no Nintendo Switch backend** — a grep of the SDL3 sources finds zero Switch-specific
+files, and devkitPro ships only `libSDL2.a` for Horizon. This port's windowing, events, gamepad and
+audio all go through SDL3, and Aurora creates its surface with `SDL_Metal_CreateView`.
+
+So the Switch platform layer replaces SDL rather than configuring it: libnx `nwindow` for the screen,
+`HidNpad` for pads, `audren` for audio, `sdmc:`/romfs for storage, and deko3d owning presentation.
+That is the same split the Shipwright-NX fork landed on.
