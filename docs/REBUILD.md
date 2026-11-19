@@ -31,7 +31,9 @@ Run *New Super Mario Bros. Wii* natively on a jailbroken Switch Lite, not via an
 console. Delivered as an installable **NSP** (an `.nro` was explicitly rejected). Target 720p,
 single-player, no LAN or online play.
 
-"Done" means: installs from the home menu, boots, and the game itself is playable.
+"Done" means **fully playable**: installs from the home menu, boots, reaches the game's own menus,
+accepts input, plays audio, and levels can actually be played through. A single presented frame is a
+milestone on the way, **not** the acceptance bar.
 
 ---
 
@@ -357,15 +359,16 @@ bugs in §4 were found this way rather than through the 64 MB game package.
 
 **Decided (2026-11-19):**
 
+* **Acceptance bar is full playability** — menus, input, audio, and levels that can be played. A first
+  frame is a milestone, not the finish line.
 * **Work is paused.** Nobody resumes this automatically; it is handed off via this document.
+* **This repository is the long-term home**, on the branch `switch-playable`, created from `switch-port`
+  for the push to full playability. The platform layer is not being folded into the runtime's own tree.
 * **Ryujinx is the only validation environment for now.** The surface fix does not need console
   validation before continuing.
 * **Game data and console keys never enter the repository** — see §0.
 
 **Open:**
 
-1. **Where should this live long-term?** Keep the platform layer in this repo, or fold it into the
-   runtime's own tree as a first-class target?
-2. **Is a first frame the acceptance bar**, or full playability (level select, controls, audio)? This
-   was not answered and is still unknown.
-3. **If work resumes:** fix one blocker and report each time, or chain several before reporting?
+1. **If work resumes:** fix one blocker and report each time, or chain several before reporting? Not yet
+   decided.
