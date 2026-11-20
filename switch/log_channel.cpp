@@ -214,6 +214,8 @@ RenderTiming g_glReplay;
 RenderTiming g_glFinish;
 RenderTiming g_efbEncode;
 #if defined(NSMBW_USE_DEKO3D)
+std::atomic<uint32_t> g_skippedEfbSnapshots{0};
+std::atomic<uint32_t> g_retainedEfbSnapshots{0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(SwitchFramePhase::Count)> g_framePhases{};
 RenderTiming g_dkFenceWait;
 std::mutex g_presentTimingMutex;
@@ -315,6 +317,21 @@ extern "C" void switch_record_gl_finish(uint64_t nanos) { g_glFinish.Add(nanos);
 extern "C" void switch_record_efb_encode(uint64_t nanos) { g_efbEncode.Add(nanos); }
 
 #if defined(NSMBW_USE_DEKO3D)
+extern "C" bool switch_direct_efb_enabled() {
+    static const bool enabled = [] {
+        const int fd = ::open(NSMBW_SWITCH_DATA_ROOT "/efb-snapshot.flag", O_RDONLY);
+        if (fd < 0) return true;
+        close(fd);
+        return false;
+    }();
+    return enabled;
+}
+
+extern "C" void switch_record_efb_snapshots(uint32_t skipped, uint32_t retained) {
+    g_skippedEfbSnapshots.fetch_add(skipped, std::memory_order_relaxed);
+    g_retainedEfbSnapshots.fetch_add(retained, std::memory_order_relaxed);
+}
+
 extern "C" bool switch_gpu_frame_profiling_enabled() {
     static const bool enabled = [] {
         if (!switch_frame_profiling_enabled()) return false;
@@ -397,6 +414,12 @@ extern "C" void switch_log_render_profile(int frames) {
 #if defined(NSMBW_USE_DEKO3D)
     switch_frame_logf("[vi] render profile: deko3d, EFB copy encoding %.2f ms (%.1f copies) per frame\n",
                       g_efbEncode.TakeMillisecondsPerFrame(frames), g_efbEncode.TakeCallsPerFrame(frames));
+    const auto skipped = g_skippedEfbSnapshots.exchange(0, std::memory_order_relaxed);
+    const auto retained = g_retainedEfbSnapshots.exchange(0, std::memory_order_relaxed);
+    if (skipped != 0 || retained != 0) {
+        switch_frame_logf("[vi] EFB snapshots: %.1f skipped, %.1f retained per frame\n",
+                          skipped / static_cast<double>(frames), retained / static_cast<double>(frames));
+    }
     const auto takePhase = [frames](SwitchFramePhase phase) {
         return g_framePhases[static_cast<size_t>(phase)].exchange(0, std::memory_order_relaxed) / (1e6 * frames);
     };

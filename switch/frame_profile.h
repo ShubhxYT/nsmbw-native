@@ -25,6 +25,8 @@ enum class SwitchFramePhase {
 };
 
 extern "C" void switch_record_frame_phase(SwitchFramePhase phase, uint64_t nanos);
+extern "C" bool switch_direct_efb_enabled();
+extern "C" void switch_record_efb_snapshots(uint32_t skipped, uint32_t retained);
 extern "C" void switch_record_dk_gpu_list(uint64_t nanos);
 extern "C" void switch_record_dk_fence_wait(uint64_t nanos);
 extern "C" void switch_record_present_latency(uint64_t queuedNanos, uint64_t acquireNanos);

@@ -1,0 +1,60 @@
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -196,6 +196,9 @@
+   bool resolveNeedsShaderSampling = false;
+   bool resolveLinearSampling = false;
+   bool snapshotColorResolveSource = false;
++#if defined(NSMBW_USE_DEKO3D)
++  bool directColorResolveSource = false;
++#endif
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+   // NSMBW: copies of this pass's resolve target into a region of another texture (add_resolve_patch).
+   struct Patch {
+@@ -663,6 +666,16 @@
+ #endif
+   prevPass.snapshotColorResolveSource =
+       useResolveSnapshot && !gx::is_depth_format(resolveFormat) && (clearColor || clearAlpha || clearDepth);
++#if defined(NSMBW_USE_DEKO3D)
++  // The copy reads the stored attachment on this encoder before the next pass clears it.
++  // Limit this to the main EFB, with a distinct destination and no persistent texture bake.
++  prevPass.directColorResolveSource =
++      prevPass.snapshotColorResolveSource && !persistentCopy && prevPass.msaaSamples == 1 &&
++      prevPass.copySourceTexture.Get() == webgpu::g_frameBuffer.texture.Get() &&
++      prevPass.copySourceTexture.Get() != prevPass.resolveTarget->texture.Get() &&
++      switch_direct_efb_enabled();
++  prevPass.snapshotColorResolveSource &= !prevPass.directColorResolveSource;
++#endif
+   Vec4<float> uniformSourceRect = sourceRect;
+   float srcW = static_cast<float>(prevPass.targetSize.width);
+   float srcH = static_cast<float>(prevPass.targetSize.height);
+@@ -1453,6 +1466,10 @@
+   const bool encodeTextureBakes = interpolatedFrame < 0;
+ #if defined(__SWITCH__)
+   const bool timeEfbCopies = switch_frame_profiling_enabled();
++#endif
++#if defined(NSMBW_USE_DEKO3D)
++  uint32_t skippedSnapshots = 0;
++  uint32_t retainedSnapshots = 0;
+ #endif
+   for (u32 i = 0; i < renderPasses.size(); ++i) {
+     const auto& passInfo = renderPasses[i];
+@@ -1597,10 +1614,19 @@
+       if (timeEfbCopies) {
+         const auto elapsed = std::chrono::steady_clock::now() - copyStart;
+         switch_record_efb_encode(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
++#if defined(NSMBW_USE_DEKO3D)
++        skippedSnapshots += passInfo.directColorResolveSource;
++        retainedSnapshots += passInfo.snapshotColorResolveSource;
++#endif
+       }
+ #endif
+     }
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  if (skippedSnapshots != 0 || retainedSnapshots != 0) {
++    switch_record_efb_snapshots(skippedSnapshots, retainedSnapshots);
++  }
++#endif
+   if (finalize) {
+     recycle_render_passes(renderPasses);
+   }

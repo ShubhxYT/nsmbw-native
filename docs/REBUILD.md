@@ -805,7 +805,34 @@ unchanged texture inputs in the frame log.
 timestamps. Use the same course and map at stock clocks and 1× to check both responsiveness
 and the frequency of long frames. Ryujinx reached the map and a course with GPU timestamps
 off. One map window avoided a mean 549 index and restart commands per frame.
-Switch Lite measurements are pending.
+
+The Switch Lite averaged 47.5 FPS over the first course run (145 seconds), including
+59.9 FPS over its final 30 seconds. A second course averaged 44.9 FPS over 75 seconds
+and 44.3 FPS over its final 30 seconds. The latter section had a median 30 framebuffer
+copies per frame and 3.47 ms per frame spent waiting for renderer preparation. The logged
+presentation queue and image acquisition peaks for that section were below 0.8 ms.
+
+### v1.0.22 direct framebuffer resolves
+
+Install `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.22-switch-direct-efb.nsp`.
+Use the v1.0.21 build, including the HOME icon. Set the NACP version to 1.0.22, apply
+`aurora-switch-deko3d-direct-efb.patch` in the Aurora tree and copy the updated Switch files.
+Reuse the v1.0.21 Dawn archive.
+
+```sh
+bash switch/rebuild.sh --pack aurora-main/lib/gfx/common.cpp switch/log_channel.cpp
+```
+
+For eligible color resolves, deko3d reads the main single-sampled Wii framebuffer directly
+after the draw pass and before the clear. The destination, copy filter and 1× render scale
+stay the same. Offscreen targets, multisampled targets and one-shot texture bakes keep
+their existing copy paths.
+
+Ryujinx displayed the map and World 1-1 at 1×. Steady course windows logged up to 25 skipped
+snapshots per frame out of 31 resolves. Switch Lite frame times and rendering still need a
+stock-clock course run. The `frame-profile.flag` report records skipped and retained snapshots
+per frame. To compare the two paths in the same build, create an empty
+`sdmc:/switch/aaa-nsmbw/efb-snapshot.flag` and relaunch to restore the old snapshot path.
 
 ---
 
