@@ -4,10 +4,11 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status.** v1.0.8-r1 runs on the Switch Lite at 1× with working controls. The merged shader
-cache warmed 1,816 pipelines in 23.2 seconds with 4,740 cache hits out of 4,740 lookups. The sampled
-world map ran at about 19 FPS. The port creates Wii save data on hardware, and a save reload has
-been verified in Ryujinx. See the [hardware measurements](#switch-lite-performance).
+**Current status.** v1.0.16 runs at 1× on the stock-clock Switch Lite with working controls.
+Its latest capture averaged 48.5 FPS over the final 30.2 seconds of a course. Heavy map windows
+ran at a median 40.2 FPS. The game thread still exceeds the 16.7 ms budget for 60 FPS.
+The port creates Wii save data on hardware, and a save reload has been verified in Ryujinx.
+See the [v1.0.16 hardware measurements](#v1016-vertex-state-reuse-test).
 
 ---
 
@@ -324,7 +325,7 @@ disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the 
 logs (`boot.log`, `init.log`).
 
 The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.15-switch-core-affinity.nsp`.
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.16-switch-vertex-state.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -636,6 +637,41 @@ straight into it. The first successful reuse logs `Switch GX vertex-state reuse 
 Compare the same map and course at 1× and stock handheld clocks, watching for visual
 differences as well as timing changes. The register-shadow approach is adapted from
 [the related Switch port](https://github.com/schuler-ph/nsmbw-switch/commit/ee154ddf8a21).
+
+The final 30.2 seconds of course play averaged 48.5 FPS, up from 42.3 FPS over the final 30.5
+seconds on v1.0.15. Across 60 course windows, median scheduled game-thread CPU was 20.27 ms per
+frame. Median waits for the frame worker and GX FIFO were 0.09 ms and 0.36 ms, respectively.
+Pipeline waits rounded to 0.00 ms and sampled GPU lists took a median 10.17 ms. The GPU list
+sample covers individual lists. It does not measure whole-frame GPU time or utilization.
+
+Among world map windows with 10,500–12,600 recorded GX draws, median FPS was 40.2 on v1.0.16
+and 35.9 on v1.0.15. Median scheduled game-thread time was 23.82 ms and 26.27 ms, respectively.
+These groups contain five and twelve two-second windows. Two large hitches included 80.22 ms
+of disc reads in a 320.4 ms course frame and 190.97 ms in a 364.6 ms map frame.
+
+### v1.0.17 checked memory and disc cache test
+
+The installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.17-switch-checked-ram.nsp`.
+Apply `runtime-switch-checked-ram.patch` and `runtime-switch-disc-cache.patch` from the runtime
+checkout root after the preceding patches. Use the updated `switch/rebuild.sh` to rebuild all
+translated game shards and the runtime units with inlined checked memory accesses:
+
+```sh
+bash switch/rebuild.sh --translated --pack \
+  runtime/src/guest_flat_memory.cpp runtime/src/memory.cpp runtime/src/ppc_quantized.cpp \
+  runtime/src/hle/egg_decomp.cpp runtime/src/hle/storage/dvd.cpp
+```
+
+Horizon always uses checked guest memory access, so the translator's C++ can fold that branch
+at compile time. Scalar stores reject coarse-page crossings with a single page-offset check.
+Executable-write, MMIO and deferred-read policy still use the same checked paths.
+
+The DVD layer keeps up to 16 native read-only files open. Repeated reads skip file open and
+size lookup. A native failure falls back to the existing read path. The first successful reuse
+logs `Switch DVD file cache active`. Compare the same course and map at 1× and stock clocks,
+checking median scheduled CPU, FPS, frame-time percentiles and disc time on hitch frames.
+Ryujinx at 1× reached the world map and World 1-1, and the boot log confirmed the DVD cache
+was active. Switch Lite results for this installer are pending.
 
 ---
 

@@ -1,0 +1,52 @@
+--- a/runtime/include/guest_flat_memory.h
++++ b/runtime/include/guest_flat_memory.h
+@@ -89,7 +89,10 @@
+ #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
+ #endif
+ 
+-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
++#if defined(__SWITCH__)
++// Horizon cannot resume a faulting guest access. Always use the checked path.
++inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
++#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+ inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
+ #else
+ // Const, set from the page size while the library initializes: a store through a flat guest pointer
+--- a/runtime/include/memory_access.h
++++ b/runtime/include/memory_access.h
+@@ -375,12 +375,10 @@
+     // its 4 KiB sub-pages are plain data; MKW's THP buffers share such a page with .text, which
+     // used to force ~15% of total CPU through the cold path. The sparse sub-page tier below
+     // keeps those stores native while the exact 4 KiB executable guards stay authoritative.
+-    if (address > UINT32_MAX - static_cast<uint32_t>(sizeof(T) - 1u)) [[unlikely]]
++    // A scalar contained in one coarse page cannot wrap the address space.
++    if ((address & kPageMask) > kPageSize - sizeof(T)) [[unlikely]]
+         return false;
+     const uint32_t coarsePage = address >> kPageShift;
+-    const uint32_t endAddress = address + static_cast<uint32_t>(sizeof(T) - 1u);
+-    if ((endAddress >> kPageShift) != coarsePage) [[unlikely]]
+-        return false;
+     const uintptr_t encodedBias = g_fullWritablePageBias[coarsePage];
+     uint8_t* ptr = nullptr;
+     if (encodedBias != 0) {
+--- a/runtime/src/guest_flat_memory.cpp
++++ b/runtime/src/guest_flat_memory.cpp
+@@ -92,17 +92,11 @@
+ #endif
+ 
+ namespace GuestFlat {
+-#if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
++#if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE) && !defined(__SWITCH__)
+ // A host page larger than a Wii page can't carry per-Wii-page protection (see the header).
+ extern const bool g_requiresCheckedAccess = [] {
+-#if defined(__SWITCH__)
+-    // Horizon has no user-installable fault handler, so guest access is bounds-checked instead of
+-    // relying on page protections to trap.
+-    return true;
+-#else
+     const long size = sysconf(_SC_PAGESIZE);
+     return size > 0 && static_cast<size_t>(size) > kGuestPageSize;
+-#endif
+ }();
+ #endif
+ namespace {

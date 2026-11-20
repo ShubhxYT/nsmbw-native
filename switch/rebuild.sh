@@ -1,11 +1,13 @@
 #!/bin/bash
 # Incremental rebuild: recompile the named translation units, relink, verify, package.
 #
-#   ./rebuild.sh [src/relative/unit.cpp ...] [--compile-only | --pack]
+#   ./rebuild.sh [src/relative/unit.cpp ...] [--translated] [--compile-only | --pack]
 #
 # With no arguments it only relinks. Unit paths are relative to /src (the mounted working tree),
 # e.g. switch/log_channel.cpp or runtime/src/main.cpp. The object name follows build-pie.sh:
 # the path below runtime/src or aurora-main/lib with slashes replaced by underscores.
+# Use --translated after changing memory or ISA helpers in the translated game.
+# NSMBW_BUILD_JOBS controls the number of translated shards compiled in parallel.
 set -euo pipefail
 
 DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
@@ -60,11 +62,13 @@ DEFINES="-D__SWITCH__ -DTARGET_PC -DCRYPTOPP_DISABLE_ASM"
 
 pack=0
 compile_only=0
+translated=0
 units=()
 for arg in "$@"; do
     case "$arg" in
         --pack) pack=1 ;;
         --compile-only) compile_only=1 ;;
+        --translated) translated=1 ;;
         *) units+=("$arg") ;;
     esac
 done
@@ -102,6 +106,18 @@ for unit in "${units[@]:-}"; do
         *) echo "unknown unit prefix: $unit" >&2; exit 2 ;;
     esac
 done
+if [ "$translated" = 1 ]; then
+    echo "== compile translated game =="
+    export CXX OBJ INCLUDES DEFINES
+    printf '%s\0' /src/generated/build_shards/base_common/*.cpp |
+        xargs -0 -r -P "${NSMBW_BUILD_JOBS:-4}" -n 1 bash -ec '
+            unit="$1"
+            base=$(basename "$unit" .cpp)
+            echo "  $base"
+            # shellcheck disable=SC2086
+            "$CXX" -std=gnu++20 $DEFINES -fPIE -c -O2 $INCLUDES "$unit" -o "$OBJ/game/game_$base.o"
+        ' _
+fi
 if [ "$compile_only" = 1 ]; then exit 0; fi
 
 echo "== link =="

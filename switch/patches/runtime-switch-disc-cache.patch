@@ -1,0 +1,107 @@
+--- a/runtime/src/hle/storage/dvd.cpp
++++ b/runtime/src/hle/storage/dvd.cpp
+@@ -21,6 +21,9 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#elif defined(__SWITCH__)
++#include <switch.h>
++#include <array>
+ #elif defined(__ANDROID__)
+ #include <fcntl.h>
+ #include <sys/resource.h>
+@@ -128,7 +131,80 @@
+     return it != g_readCache.end() ? it->second : nullptr;
+ }
+ 
+-#if defined(__ANDROID__)
++#if defined(__SWITCH__)
++struct SwitchDiscFile {
++    fs::path::string_type path;
++    FsFile file{};
++    uint64_t size = 0;
++    uint64_t lastUse = 0;
++
++    ~SwitchDiscFile() { Close(); }
++
++    void Close() {
++        if (lastUse != 0) {
++            fsFileClose(&file);
++            lastUse = 0;
++        }
++    }
++};
++
++bool TryReadSwitchDiscFile(const fs::path& path, uint64_t offset, uint32_t length,
++                           std::vector<uint8_t>& destination) {
++    static std::mutex mutex;
++    static std::array<SwitchDiscFile, 16> files;
++    static uint64_t clock = 0;
++    static bool loggedHit = false;
++    std::lock_guard lock(mutex);
++
++    auto entry = std::find_if(files.begin(), files.end(), [&](const SwitchDiscFile& file) {
++        return file.lastUse != 0 && file.path == path.native();
++    });
++    const bool cacheHit = entry != files.end();
++    if (!cacheHit) {
++        entry = std::min_element(files.begin(), files.end(), [](const auto& a, const auto& b) {
++            return a.lastUse < b.lastUse;
++        });
++        char nativePath[FS_MAX_PATH];
++        FsFileSystem* device = nullptr;
++        if (fsdevTranslatePath(path.c_str(), &device, nativePath) != 0 || !device) {
++            return false;
++        }
++        entry->Close();
++        entry->path = path.native();
++        if (R_FAILED(fsFsOpenFile(device, nativePath, FsOpenMode_Read, &entry->file))) {
++            return false;
++        }
++        entry->lastUse = ++clock;
++        s64 size = 0;
++        if (R_FAILED(fsFileGetSize(&entry->file, &size)) || size < 0) {
++            entry->Close();
++            return false;
++        }
++        entry->size = static_cast<uint64_t>(size);
++    }
++    if (offset >= entry->size || length > entry->size - offset) {
++        entry->Close();
++        return false;
++    }
++
++    // The caller's buffer receives bytes only after a complete read.
++    std::vector<uint8_t> staged(length);
++    u64 received = 0;
++    if (length != 0 &&
++        (R_FAILED(fsFileRead(&entry->file, static_cast<s64>(offset), staged.data(),
++                             length, FsReadOption_None, &received)) || received != length)) {
++        entry->Close();
++        return false;
++    }
++    entry->lastUse = ++clock;
++    destination = std::move(staged);
++    if (cacheHit && !loggedHit) {
++        RT_LOGF(RT_TAG_DVD, "Switch DVD file cache active\n");
++        loggedHit = true;
++    }
++    return true;
++}
++#elif defined(__ANDROID__)
+ // Files the game has read, kept open (with their sizes), so the next read of one skips the open.
+ struct OpenFile {
+     int fd = -1;
+@@ -211,7 +287,11 @@
+             ok = true;
+         }
+     } else {
+-#if defined(__ANDROID__)
++#if defined(__SWITCH__)
++        failure = DvdReadContract::HostReadFailure::None;
++        ok = TryReadSwitchDiscFile(path, offset, length, destination) ||
++             DvdReadContract::ReadExact(path, offset, length, destination, failure);
++#elif defined(__ANDROID__)
+         ok = ReadWithOpenFile(path, offset, length, destination, failure);
+ #else
+         ok = DvdReadContract::ReadExact(path, offset, length, destination, failure);
