@@ -346,10 +346,15 @@ extern "C" void switch_record_gpu_frame_part(uint64_t tag, uint64_t begin, uint6
         else sample.renderEnd = end;
         return;
     }
-    if (sample.frame == frame && sample.renderEnd <= begin) {
+    if (sample.frame == frame) {
+        // Pipeline-top composition may start before the render end marker reaches the bottom
+        // of the pipeline. Include the pair but count any overlap only once.
+        const uint64_t overlapStart = std::max(sample.renderBegin, begin);
+        const uint64_t overlapEnd = std::min(sample.renderEnd, end);
+        const uint64_t overlap = overlapEnd > overlapStart ? overlapEnd - overlapStart : 0;
         ++g_gpuFrameSamples;
-        g_gpuFrameWorkNanos += sample.renderEnd - sample.renderBegin + end - begin;
-        g_gpuFrameSpanNanos += end - sample.renderBegin;
+        g_gpuFrameWorkNanos += sample.renderEnd - sample.renderBegin + end - begin - overlap;
+        g_gpuFrameSpanNanos += std::max(sample.renderEnd, end) - std::min(sample.renderBegin, begin);
         sample = {};
     }
 }
@@ -362,11 +367,15 @@ extern "C" void switch_log_render_profile(int frames) {
     const auto takePhase = [frames](SwitchFramePhase phase) {
         return g_framePhases[static_cast<size_t>(phase)].exchange(0, std::memory_order_relaxed) / (1e6 * frames);
     };
+    const double sealWait = takePhase(SwitchFramePhase::WorkerWaitSealed);
+    const double doneWait = takePhase(SwitchFramePhase::WorkerWaitDone);
     switch_frame_logf("[vi] handheld profile: worker wait %.2f, worker encode %.2f, staging map %.2f, "
                       "EFB readback wait %.2f, EFB RAM encode %.2f ms/frame\n",
-                      takePhase(SwitchFramePhase::WorkerWait), takePhase(SwitchFramePhase::WorkerEncode),
+                      sealWait + doneWait, takePhase(SwitchFramePhase::WorkerEncode),
                       takePhase(SwitchFramePhase::StagingMap), takePhase(SwitchFramePhase::EfbReadbackWait),
                       takePhase(SwitchFramePhase::EfbReadbackEncode));
+    switch_frame_logf("[vi] render worker phases: wait for prepare %.2f, wait for completion %.2f ms/frame\n",
+                      sealWait, doneWait);
     switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
                       takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
     const double sampledGxBegin = takePhase(SwitchFramePhase::GxBeginSample);

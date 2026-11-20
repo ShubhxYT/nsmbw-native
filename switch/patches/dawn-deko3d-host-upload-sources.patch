@@ -1,0 +1,78 @@
+--- a/src/dawn/native/deko3d/BufferDeko3d.h
++++ b/src/dawn/native/deko3d/BufferDeko3d.h
+@@ -57,6 +57,11 @@
+     MaybeError EnsureDataInitializedAsDestination(const CopyTextureToBufferCmd* copy,
+                                                   bool* outDidDataInitialization = nullptr);
+ 
++    // Both deko3d copy commands snapshot these sources into other memory while recording.
++    // Use internal usage too: a buffer with an added shader binding must remain GPU-visible.
++    bool IsHostUploadSource() const {
++        return GetInternalUsage() == (wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc);
++    }
+     void TrackUsage() { MarkUsedInPendingCommands(); }
+ 
+   private:
+--- a/src/dawn/native/deko3d/BufferDeko3d.cpp
++++ b/src/dawn/native/deko3d/BufferDeko3d.cpp
+@@ -80,13 +80,23 @@
+ 
+     DkMemBlockMaker maker;
+     dkMemBlockMakerDefaults(&maker, device->GetDkDevice(), static_cast<uint32_t>(blockSize));
+-    maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
++    // Host upload sources never expose this allocation to GPU commands. The GPU uses the
++    // separate upload allocation or inline command data populated synchronously at submit.
++    maker.flags = IsHostUploadSource() ? DkMemBlockFlags_CpuCached
++                                     : DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+     mMemBlock = dkMemBlockCreate(&maker);
+     if (mMemBlock == nullptr) {
+         ToBackend(GetDevice())->ReportMemory("buffer alloc failed");
+         std::fprintf(stderr, "[deko3d-mem] failed buffer size=%llu\n", (unsigned long long)blockSize);
+         return DAWN_OUT_OF_MEMORY_ERROR("dkMemBlockCreate failed for a buffer.");
+     }
++    if (IsHostUploadSource()) {
++        static const bool logged = [] {
++            std::fputs("[deko3d] CPU-cached upload sources active\n", stderr);
++            return true;
++        }();
++        (void)logged;
++    }
+     GetMemStats().bufferBytes += blockSize;
+     GetMemStats().bufferCount++;
+     if (clearNonzero) {
+@@ -161,8 +171,8 @@
+ }
+ 
+ MaybeError Buffer::MapAsyncImpl(wgpu::MapMode mode, size_t offset, size_t size) {
+-    // The frontend resolves the map once the queue has finished every command submitted so far,
+-    // after which the unified-memory pointer is safe to read or write.
++    // The frontend resolves the map after the last GPU command that accessed this buffer.
++    // Upload sources copied while recording have no outstanding GPU accesses.
+     DAWN_TRY(EnsureDataInitialized());
+     return {};
+ }
+--- a/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
++++ b/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
+@@ -374,7 +374,11 @@
+                                   (unsigned long long)copy->destinationOffset);
+                     device->TraceFlush(what);
+                 }
+-                source->TrackUsage();
++                // The copy above already consumed a host upload source. Its next map can complete
++                // as soon as this submit releases frontend ownership, regardless of the GPU fence.
++                if (!source->IsHostUploadSource()) {
++                    source->TrackUsage();
++                }
+                 destination->TrackUsage();
+                 break;
+             }
+@@ -393,7 +397,9 @@
+                 layout.rowsPerImage = dchecked_cast<uint32_t>(copy->source.rowsPerImage);
+                 DAWN_TRY(device->RecordTextureUpload(copy->destination, buffer->GetCpuAddr(),
+                                                      layout, copy->copySize.ToExtent3D()));
+-                buffer->TrackUsage();
++                if (!buffer->IsHostUploadSource()) {
++                    buffer->TrackUsage();
++                }
+                 break;
+             }
+ 

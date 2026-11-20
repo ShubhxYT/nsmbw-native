@@ -1,0 +1,13 @@
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -390,7 +390,9 @@
+ 
+ void wait_for_frame_worker_private(FrameWorkerPhase phase) noexcept {
+ #if defined(NSMBW_USE_DEKO3D)
+-  const SwitchFrameTimer timing(SwitchFramePhase::WorkerWait, !frame_worker_phase_reached(phase));
++  const auto waitPhase = phase == FrameWorkerPhase::Sealed ? SwitchFramePhase::WorkerWaitSealed
++                                                            : SwitchFramePhase::WorkerWaitDone;
++  const SwitchFrameTimer timing(waitPhase, !frame_worker_phase_reached(phase));
+ #endif
+   constexpr auto kWaitServiceInterval = std::chrono::milliseconds(1);
+   while (!wait_for_frame_worker_private_for(phase, kWaitServiceInterval)) {

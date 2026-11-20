@@ -4,11 +4,10 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status.** v1.0.17 runs at 1× on the stock-clock Switch Lite with working controls.
-Its latest capture averaged 44.1 FPS over the recorded 26.2 seconds of a course, at a median
-19.22 ms of game-thread CPU per frame. The previous run covered a different stretch of the course.
-The port creates Wii save data on hardware, and a save reload has been verified in Ryujinx.
-See the [v1.0.17 hardware measurements](#v1017-checked-memory-and-disc-cache-test).
+**Current status.** v1.0.18 runs at 1× on the stock-clock Switch Lite with working controls.
+Its latest course capture averaged 47.2 FPS in the last 30 seconds and 43.9 FPS overall.
+It reached 58.9 FPS in two-second windows. The worst sustained stretch showed waiting for
+the render worker as a major cost. See the [v1.0.18 hardware measurements](#v1018-checked-memory-ranges-disc-cache-and-profiling).
 
 ---
 
@@ -325,7 +324,7 @@ disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the 
 logs (`boot.log`, `init.log`).
 
 The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.17-switch-checked-ram.nsp`.
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.18-switch-memory-and-io.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -708,7 +707,43 @@ duration covers the two measured command batches. The elapsed span also includes
 between them. Earlier copy-only work, queue work outside those batches and GPU utilization
 are outside this measurement. The profile reads timestamps after the existing fence completes.
 Ryujinx at 1× reached World 1-2 and returned to the map. Its logs confirmed RAM cache hits,
-GX producer timings, and paired GPU samples. Lite measurements are pending.
+GX producer timings, and paired GPU samples.
+
+On the Lite, the recorded 106.7-second course averaged 43.9 FPS and the final 30.2 seconds
+averaged 47.2 FPS. The final 6.0 seconds on the map averaged 44.4 FPS. In the slowest
+two-second course window (24.9 FPS), game-thread CPU was 17.85 ms, worker wait was 21.03 ms
+per frame and staging map time was 4.57 ms per frame. In the final window at 58.9 FPS, those
+readings were 12.42, 0.53 and 0.29 ms. The worker wait aggregates callers and can overlap
+the staging timer. Several long course frames had no disc I/O. GPU pair coverage was
+sparse in the slow windows. The capture is a different length and workload from v1.0.17.
+
+### v1.0.19 render staging and HOME icon
+
+Installer: `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.19-switch-render-staging.nsp`.
+Apply `dawn-deko3d-host-upload-sources.patch` in Dawn after the preceding Dawn patches.
+Apply `aurora-switch-worker-wait-phases.patch` in Aurora, copy the updated Switch platform files,
+and rebuild the two Dawn objects and the Switch units:
+
+```sh
+export DAWN_BUILD_DIR=/deko/dawn-build
+export DAWN_AR=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar
+python3 switch/rebuild-dawn-object.py BufferDeko3d.cpp
+python3 switch/rebuild-dawn-object.py CommandBufferDeko3d.cpp
+bash switch/rebuild.sh --pack aurora-main/lib/aurora.cpp switch/log_channel.cpp
+```
+
+Before packaging, set the NACP display version to 1.0.19 and place the supplied HOME artwork
+in `/pack/control_g/icon_AmericanEnglish.dat` as an RGB 256×256 JPEG without EXIF. The
+installer's control NCA contains the artwork supplied for this build. It is local to the package.
+
+The deko3d backend copies host-only upload sources while recording, into inline command data
+or separately owned upload memory. These sources now use CPU-cached memory with no GPU mapping.
+Their next map no longer waits for a GPU serial from that copy. Buffers used by the GPU continue
+to use normal serial tracking. The profile reports waits for preparation and completion
+separately, and it includes GPU samples whose render and composition intervals overlap.
+Watch for a lower staging-map wait, fewer long frames and correct textures in the same course.
+Ryujinx logs confirmed the upload path and the new wait counters were active through the
+world map and a manually entered course. Switch Lite results are pending.
 
 ---
 

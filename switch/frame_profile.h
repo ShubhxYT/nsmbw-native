@@ -12,7 +12,7 @@ extern "C" void switch_log_render_profile(int frames);
 #include <chrono>
 
 enum class SwitchFramePhase {
-    WorkerWait,
+    WorkerWaitSealed,
     WorkerEncode,
     StagingMap,
     EfbReadbackWait,
@@ -20,6 +20,7 @@ enum class SwitchFramePhase {
     GxSyncWait,
     PipelineWait,
     GxBeginSample,
+    WorkerWaitDone,
     Count,
 };
 
