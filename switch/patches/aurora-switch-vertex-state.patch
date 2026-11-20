@@ -1,0 +1,42 @@
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -151,6 +151,10 @@
+ // NSMBW: aurora's vertex descriptor (vcdLo, vcdHi), format `fmt`'s attribute table (vatA/B/C) and
+ // normal type, as last set through the GX API.
+ void AuroraGetVtxFormatRegs(uint32_t fmt, uint32_t out[6]);
++#if defined(NSMBW_USE_DEKO3D)
++void AuroraGetVtxShadow(uint32_t fmt, uint32_t out[7]);
++bool AuroraResendVtxShadow(uint32_t fmt, const uint32_t expected[7]);
++#endif
+ // NSMBW: with the GX thread (NSMBW_GX_THREAD=1), waits until it has decoded everything queued, so
+ // memory a queued command points at may be reused. A no-op otherwise.
+ void AuroraGxSync(void);
+--- a/lib/dolphin/gx/GXGeometry.cpp
++++ b/lib/dolphin/gx/GXGeometry.cpp
+@@ -479,3 +479,26 @@
+   out[4] = fmt < 8 ? __gx->vatC[fmt] : 0;
+   out[5] = static_cast<uint32_t>(__gx->nrmType);
+ }
++
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" void AuroraGetVtxShadow(uint32_t fmt, uint32_t out[7]) {
++  AuroraGetVtxFormatRegs(fmt, out);
++  out[6] = static_cast<uint32_t>(__gx->hasNrms) | (static_cast<uint32_t>(__gx->hasBiNrms) << 8);
++}
++
++extern "C" bool AuroraResendVtxShadow(uint32_t fmt, const uint32_t expected[7]) {
++  if (fmt >= GX_MAX_VTXFMT || !aurora::gx::fifo::threaded() || aurora::gx::fifo::in_display_list()) {
++    return false;
++  }
++  uint32_t current[7];
++  AuroraGetVtxShadow(fmt, current);
++  if (std::memcmp(current, expected, sizeof(current)) != 0) {
++    return false;
++  }
++  // The decoded state can differ after a display list. Re-emit VCD and VAT in FIFO order
++  // even when the producer's register shadow already contains the requested state.
++  __gx->dirtyState |= 8 | 0x10;
++  __gx->dirtyVAT |= static_cast<u8>(1u << fmt);
++  return true;
++}
++#endif

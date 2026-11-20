@@ -324,7 +324,7 @@ disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the 
 logs (`boot.log`, `init.log`).
 
 The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.14-switch-overlap-encode.nsp`.
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.15-switch-core-affinity.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -614,6 +614,28 @@ Compare the same map and course sections at 1× with warm caches and stock handh
 The related Switch port queues texture copies on the GX worker. That experiment produced
 visible corruption in this build in Ryujinx, so this test uses the copy ordering from v1.0.14.
 See [the related port's texture copy change](https://github.com/schuler-ph/nsmbw-switch/commit/4e3a98be14f2).
+
+The Lite confirmed both affinity assignments. The final 30.5 seconds of course play
+averaged 42.3 FPS with 22.6 ms of game-thread CPU per frame. The last 12.1 seconds recorded
+on the map averaged 38.5 FPS. The heavier map windows still took a median 26.5 ms of
+game-thread CPU per frame. No pipeline wait was measurable in this capture.
+
+### v1.0.16 vertex state reuse test
+
+The test installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.16-switch-vertex-state.nsp`.
+
+Apply `aurora-switch-vertex-state.patch` in Aurora and `runtime-switch-vertex-state.patch`
+from the runtime checkout root after the GX worker patches. Recompile Aurora's
+`lib/dolphin/gx/GXGeometry.cpp` and the runtime's `runtime/src/hle/gx/gx_fifo.cpp` and
+`runtime/src/hle/gx/gx_vertex.cpp`.
+
+Reuse the vertex layout and register shadow for consecutive buffered draws when the
+runtime layout generation and Aurora's producer registers still match. The same register
+writes are emitted in FIFO order. Direct FIFO stores that fit in a pending packet go
+straight into it. The first successful reuse logs `Switch GX vertex-state reuse active`.
+Compare the same map and course at 1× and stock handheld clocks, watching for visual
+differences as well as timing changes. The register-shadow approach is adapted from
+[the related Switch port](https://github.com/schuler-ph/nsmbw-switch/commit/ee154ddf8a21).
 
 ---
 

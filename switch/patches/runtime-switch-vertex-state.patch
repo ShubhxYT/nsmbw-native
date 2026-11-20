@@ -1,0 +1,130 @@
+--- a/runtime/src/hle/gx/gx_fifo.cpp
++++ b/runtime/src/hle/gx/gx_fifo.cpp
+@@ -41,9 +41,33 @@
+     // publishes GX_VA_NBT after GX_VA_NRM, which makes aurora's SETVAT fall-through clobber the
+     // NRM VAT with the default. Raw-FIFO geometry renders correctly with it; do not "fix" without
+     // an in-race A/B run.
+-    PublishAuroraVtxState(fmt, AuroraVtxPublishOptions{/*includeNbt=*/true,
+-                                                       /*fmtLoopFirst=*/0,
+-                                                       /*fmtLoopLast=*/25});
++    constexpr AuroraVtxPublishOptions options{/*includeNbt=*/true, /*fmtLoopFirst=*/0, /*fmtLoopLast=*/25};
++#if defined(NSMBW_USE_DEKO3D)
++    if (fmt < GX_MAX_VTXFMT) {
++        struct Published {
++            bool valid = false;
++            uint32_t generation = 0;
++            uint32_t shadow[7]{};
++        };
++        static Published published[GX_MAX_VTXFMT];
++        auto& last = published[fmt];
++        const uint32_t generation = g_hleGxState.vtxStateGeneration;
++        if (last.valid && last.generation == generation && AuroraResendVtxShadow(fmt, last.shadow)) {
++            static const bool logged = [] {
++                std::fputs("Switch GX vertex-state reuse active\n", stderr);
++                return true;
++            }();
++            (void)logged;
++            return;
++        }
++        PublishAuroraVtxState(fmt, options);
++        AuroraGetVtxShadow(fmt, last.shadow);
++        last.generation = generation;
++        last.valid = true;
++        return;
++    }
++#endif
++    PublishAuroraVtxState(fmt, options);
+ }
+ 
+ // There is deliberately no indexed-aurora path here. Immediate-mode indexed
+@@ -56,7 +80,7 @@
+     return DirectAttrByteSize(attr, fmt, /*matrixAttrIsOneByte=*/true, /*fallbackComps=*/1u);
+ }
+ 
+-static bool TryGetRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
++static bool ComputeRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
+     vertexSize = 0;
+     if (fmt >= GX_MAX_VTXFMT) {
+         return false;
+@@ -81,6 +105,30 @@
+     }
+ 
+     return vertexSize != 0;
++}
++
++static bool TryGetRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
++#if defined(NSMBW_USE_DEKO3D)
++    if (fmt < GX_MAX_VTXFMT) {
++        struct VertexSize {
++            bool valid = false;
++            bool direct = false;
++            uint32_t generation = 0;
++            uint32_t size = 0;
++        };
++        static VertexSize sizes[GX_MAX_VTXFMT];
++        auto& entry = sizes[fmt];
++        const uint32_t generation = g_hleGxState.vtxStateGeneration;
++        if (!entry.valid || entry.generation != generation) {
++            entry.direct = ComputeRawDirectFifoVertexSize(fmt, entry.size);
++            entry.generation = generation;
++            entry.valid = true;
++        }
++        vertexSize = entry.size;
++        return entry.direct;
++    }
++#endif
++    return ComputeRawDirectFifoVertexSize(fmt, vertexSize);
+ }
+ 
+ static bool TrySubmitRawDirectFifoDraw(const uint8_t* packet, uint32_t packetBytes, GXPrimitive prim,
+@@ -418,6 +466,26 @@
+     }
+     if (g_hleGxState.rawBegin) {
+         const uint32_t count = sizeBytes == 0 ? 4u : std::min<uint32_t>(sizeBytes, 4u);
++#if defined(NSMBW_USE_DEKO3D)
++        auto& state = g_hleGxState;
++        if (count <= state.rawExpected - state.rawFilled) {
++            uint8_t* dst = state.rawPacket.data() + state.rawFilled;
++            if (count == 4) {
++                BigEndian::Write32(dst, val);
++            } else if (count == 2) {
++                BigEndian::Write16(dst, static_cast<uint16_t>(val));
++            } else {
++                for (uint32_t i = 0; i < count; ++i) {
++                    dst[i] = static_cast<uint8_t>(val >> (8u * (count - 1u - i)));
++                }
++            }
++            state.rawFilled += count;
++            if (state.rawFilled == state.rawExpected) {
++                RawBeginFinish();
++            }
++            return;
++        }
++#endif
+         uint8_t bytes[4];
+         for (uint32_t i = 0; i < count; ++i) {
+             bytes[i] = static_cast<uint8_t>(val >> (8u * (count - 1u - i)));
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -308,12 +308,21 @@
+         return;
+     }
+     ServiceDeferredTimingDuringGxWork();
++#if !defined(NSMBW_USE_DEKO3D)
+     ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
++#endif
+     g_hleGxState.currentVtxFmt=(GXVtxFmt)vf; g_hleGxState.currentPrim=(GXPrimitive)t;
+     g_hleGxState.vertsRemaining=nv; g_hleGxState.inBegin=true; g_hleGxState.auroraBeginCalled=false;
+     g_hleGxState.fifoReadOffset = 0;
+     g_hleGxState.fifoByteCount=0; g_hleGxState.ResetVertex();
++#if defined(NSMBW_USE_DEKO3D)
++    // Buffered draws publish the complete vertex state when they are submitted.
++    if (!HleTryBeginRaw(static_cast<GXPrimitive>(t), static_cast<GXVtxFmt>(vf), static_cast<uint16_t>(nv))) {
++        ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
++    }
++#else
+     HleTryBeginRaw(static_cast<GXPrimitive>(t), static_cast<GXVtxFmt>(vf), static_cast<uint16_t>(nv));
++#endif
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801c5570, GX__Begin_8016f0f0, (uint32_t t, uint32_t vf, uint32_t nv), (t, vf, nv));
+ 
