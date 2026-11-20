@@ -829,10 +829,27 @@ stay the same. Offscreen targets, multisampled targets and one-shot texture bake
 their existing copy paths.
 
 Ryujinx displayed the map and World 1-1 at 1×. Steady course windows logged up to 25 skipped
-snapshots per frame out of 31 resolves. Switch Lite frame times and rendering still need a
-stock-clock course run. The `frame-profile.flag` report records skipped and retained snapshots
-per frame. To compare the two paths in the same build, create an empty
+snapshots per frame out of 31 resolves. The `frame-profile.flag` report records skipped and
+retained snapshots per frame. To compare the two paths in the same build, create an empty
 `sdmc:/switch/aaa-nsmbw/efb-snapshot.flag` and relaunch to restore the old snapshot path.
+
+The Switch Lite averaged 53.7 FPS across the 74.6-second course capture at 1×. The final
+30 seconds before the return to the map averaged 54.2 FPS (18.44 ms per frame). Both final
+sections below had a median of 30 GX copies and about 2,300 GX draws per frame.
+
+| Last 30 seconds of course play | v1.0.21 second course | v1.0.22 |
+| --- | ---: | ---: |
+| Average FPS | 44.3 | 54.2 |
+| Two-second FPS range | 37.2–54.8 | 47.9–60.1 |
+| Two-second windows with a frame over 50 ms | 14 of 15 | 2 of 15 |
+| Longest frame | 318.7 ms | 73.8 ms |
+| Median renderer preparation wait per frame | 3.47 ms | 0.07 ms |
+
+The new path skipped a median of 25 snapshots per frame. In the slowest final window,
+the game thread was active for 19.35 ms per frame with 0.07 ms spent waiting for renderer
+preparation. That points to reducing active CPU work to reach the 16.67 ms budget more
+consistently. This comparison uses separate play runs. A test with the v1.0.22 fallback
+flag would isolate the effect of the snapshot change.
 
 ---
 
