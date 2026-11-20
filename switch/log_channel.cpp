@@ -216,6 +216,13 @@ RenderTiming g_efbEncode;
 #if defined(NSMBW_USE_DEKO3D)
 std::array<std::atomic<uint64_t>, static_cast<size_t>(SwitchFramePhase::Count)> g_framePhases{};
 RenderTiming g_dkFenceWait;
+std::mutex g_presentTimingMutex;
+struct PresentTiming {
+    uint64_t maxQueueNanos = 0;
+    uint64_t maxAcquireNanos = 0;
+    uint32_t samples = 0;
+};
+PresentTiming g_presentTiming;
 // Sum and count are captured together because the GPU worker and VI report race.
 std::mutex g_gpuSamplesMutex;
 uint64_t g_gpuSampleNanos = 0;
@@ -318,6 +325,13 @@ extern "C" void switch_record_dk_gpu_list(uint64_t nanos) {
 
 extern "C" void switch_record_dk_fence_wait(uint64_t nanos) { g_dkFenceWait.Add(nanos); }
 
+extern "C" void switch_record_present_latency(uint64_t queuedNanos, uint64_t acquireNanos) {
+    std::lock_guard lock(g_presentTimingMutex);
+    g_presentTiming.maxQueueNanos = std::max(g_presentTiming.maxQueueNanos, queuedNanos);
+    g_presentTiming.maxAcquireNanos = std::max(g_presentTiming.maxAcquireNanos, acquireNanos);
+    ++g_presentTiming.samples;
+}
+
 namespace {
 thread_local uint64_t g_gpuSampleTag = 0;
 
@@ -376,6 +390,17 @@ extern "C" void switch_log_render_profile(int frames) {
                       takePhase(SwitchFramePhase::EfbReadbackEncode));
     switch_frame_logf("[vi] render worker phases: wait for prepare %.2f, wait for completion %.2f ms/frame\n",
                       sealWait, doneWait);
+    PresentTiming presentTiming;
+    {
+        std::lock_guard lock(g_presentTimingMutex);
+        presentTiming = std::exchange(g_presentTiming, PresentTiming{});
+    }
+    if (presentTiming.samples != 0) {
+        switch_frame_logf("[vi] presentation latency: peak queue %.2f ms, peak acquire %.2f ms "
+                          "(%u attempts)\n",
+                          presentTiming.maxQueueNanos / 1e6, presentTiming.maxAcquireNanos / 1e6,
+                          presentTiming.samples);
+    }
     switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
                       takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
     const double sampledGxBegin = takePhase(SwitchFramePhase::GxBeginSample);

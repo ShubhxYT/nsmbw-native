@@ -1,0 +1,41 @@
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -908,6 +908,9 @@
+   bool duplicated = false;
+   // Whole display periods the group slid forward at encode time (late group).
+   uint32_t slidPeriods = 0;
++#if defined(NSMBW_USE_DEKO3D)
++  PresentClock::time_point queuedAt{};
++#endif
+ };
+ 
+ std::array<std::vector<std::shared_ptr<PresentationImage>>, gx::MaxInterpolatedFrames + 1>
+@@ -998,6 +1001,13 @@
+       acquireDuration =
+           std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() - acquireStarted);
+       g_lastAcquireNanos.store(acquireDuration.count(), std::memory_order_relaxed);
++#if defined(NSMBW_USE_DEKO3D)
++      if (job.queuedAt != PresentClock::time_point{}) {
++        const auto queued = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            submissionStarted - job.queuedAt);
++        switch_record_present_latency(queued.count(), acquireDuration.count());
++      }
++#endif
+       if (acquired) {
+         const wgpu::CommandEncoderDescriptor encoderDescriptor{
+             .label = "Presentation encoder",
+@@ -1273,7 +1283,14 @@
+       }
+     }
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  const auto queuedAt = switch_frame_profiling_enabled() ? PresentClock::now()
++                                                       : PresentClock::time_point{};
++#endif
+   for (auto& job : jobs) {
++#if defined(NSMBW_USE_DEKO3D)
++    job.queuedAt = queuedAt;
++#endif
+     g_presenter.jobs.emplace_back(std::move(job));
+   }
+   lock.unlock();

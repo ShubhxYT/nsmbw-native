@@ -743,7 +743,36 @@ to use normal serial tracking. The profile reports waits for preparation and com
 separately, and it includes GPU samples whose render and composition intervals overlap.
 Watch for a lower staging-map wait, fewer long frames and correct textures in the same course.
 Ryujinx logs confirmed the upload path and the new wait counters were active through the
-world map and a manually entered course. Switch Lite results are pending.
+world map and a manually entered course.
+
+The Lite's v1.0.19 capture reported effectively zero staging-map wait in the course windows.
+Near the end of the run, a 2,481 ms frame coincided with a 2,477 ms presentation surface
+acquire. The player reported over a second of latency. The capture does not establish whether
+the stall happened while playing or when the player left the game, and it does not measure
+button-to-screen latency.
+
+### v1.0.20 staging rollback and presentation timing
+
+Installer: `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.20-switch-latency-check.nsp`.
+Use Dawn from v1.0.18, with the paired GPU profile patch. Omit
+`dawn-deko3d-host-upload-sources.patch`; if it was applied, reverse it and rebuild
+`BufferDeko3d.cpp` and `CommandBufferDeko3d.cpp` before linking. This restores the
+previous upload mapping and source serial tracking for the latency comparison.
+
+Keep the v1.0.19 worker-phase profile and supplied icon. Apply
+`aurora-switch-presentation-latency.patch` in Aurora, copy the updated Switch platform
+files, set NACP version 1.0.20 and run:
+
+```sh
+bash switch/rebuild.sh --pack aurora-main/lib/aurora.cpp switch/log_channel.cpp
+```
+
+With profiling enabled, the log reports the peak delay between enqueue and start of
+presentation and the peak time spent acquiring a display buffer for jobs that reached
+acquire. Compare a continuous course with the same controller and display settings,
+including time spent playing before leaving the game. These timings describe the display
+pipeline and cannot directly measure button-to-screen delay. Ryujinx confirmed the new timings
+through the world map. The Lite latency comparison is pending.
 
 ---
 
