@@ -1,0 +1,48 @@
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -2618,6 +2618,38 @@
+     const auto start = Clock::now();
+     uint32_t total = 0;
+     aurora_get_prewarm_progress(nullptr, &total);
++#if defined(NSMBW_USE_DEKO3D)
++    if (total == 0) {
++        aurora_prewarm_release(UINT32_MAX);
++        return;
++    }
++    constexpr auto limit = std::chrono::minutes(3);
++    bool released = false;
++    while (Clock::now() - start < limit) {
++        UpdateAuroraAndProcessEvents();
++        const uint32_t queued = aurora_get_queued_pipeline_count();
++        if (released && queued == 0) {
++            break;
++        }
++        if (BeginAuroraFrame()) {
++            aurora_wait_for_frame_worker();
++            DrawShaderLoading(total - std::min(total, queued), total);
++            aurora_end_frame();
++        }
++        if (!released) {
++            aurora_prewarm_release(UINT32_MAX);
++            released = true;
++        }
++        SDL_Delay(50);
++    }
++    const uint32_t remaining = aurora_get_queued_pipeline_count();
++    UpdateAuroraAndProcessEvents();
++    if (BeginAuroraFrame()) {
++        g_auroraFrameActive.store(true, std::memory_order_release);
++    }
++    RT_LOGF(RT_TAG_RUNTIME, "shader loading screen: %u/%u pipelines ready in %.1f s\n",
++            total - std::min(total, remaining), total, seconds(Clock::now() - start));
++#else
+     const double cores = std::max(2u, std::thread::hardware_concurrency());
+     const double busyCores = std::max(1.0, cores - 0.8);
+     constexpr uint32_t batch = 192;
+@@ -2682,5 +2714,6 @@
+     }
+     RT_LOGF(RT_TAG_RUNTIME, "shader loading screen: %u pipelines in %u batches, %.1f s, %u frames\n", total, batches,
+             seconds(Clock::now() - start), frames);
++#endif
+ }
+ } // namespace settings_overlay

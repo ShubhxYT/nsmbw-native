@@ -86,6 +86,12 @@
 #include "hle_stubs.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#if defined(__SWITCH__)
+#include "switch/frame_log.h"
+#if defined(NSMBW_USE_DEKO3D)
+extern "C" bool switch_mount_shader_seed();
+#endif
+#endif
 #include "updater.h"
 #include "runtime_product.h"
 #include "recomp_mod_loader.h"
@@ -915,6 +921,15 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
                               const char* message, unsigned int len) {
     const std::string_view moduleView = module != nullptr ? std::string_view(module) : std::string_view{};
     const std::string_view messageView = message != nullptr ? std::string_view(message, len) : std::string_view{};
+#if defined(__SWITCH__)
+    if (moduleView == "aurora" &&
+        ((level == LOG_INFO && messageView.starts_with("Presentation hitch:")) ||
+         (level == LOG_WARNING && messageView.starts_with("Presentation job took ")))) {
+        switch_frame_logf("[aurora] [%d] [aurora] %.*s\n", static_cast<int>(level),
+                          static_cast<int>(messageView.size()), messageView.data());
+        return;
+    }
+#endif
     std::cerr << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
               << messageView << std::endl;
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -1564,7 +1579,10 @@ int RuntimeMain(int argc, char** argv) {
         AuroraConfig auroraConfig = {};
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
-        const auto rendererCacheDirectory = applicationDataDirectory / "Cache";
+        auto rendererCacheDirectory = applicationDataDirectory / "Cache";
+#if defined(NSMBW_USE_DEKO3D)
+        rendererCacheDirectory /= "deko3d";
+#endif
         std::error_code rendererPathError;
         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
         if (rendererPathError) {
@@ -1584,8 +1602,18 @@ int RuntimeMain(int argc, char** argv) {
         if (!auroraResourcesPath.empty()) {
             auroraConfig.resourcesPath = auroraResourcesPath.c_str();
         }
+#if defined(NSMBW_USE_DEKO3D)
+        if (switch_mount_shader_seed()) {
+            auroraConfig.resourcesPath = "romfs:/";
+        }
+#endif
         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
+#if defined(__SWITCH__)
+        // GX can emit debug diagnostics for each draw. Horizon writes stdio to the SD card.
+        auroraConfig.logLevel = LOG_INFO;
+#else
         auroraConfig.logLevel = LOG_DEBUG;
+#endif
         // NSMBW display settings: aspect_mode, else the older widescreen/force_16_9 keys.
         DisplaySettings::Settings displaySettings;
         displaySettings.aspect = RuntimeConfigFile::AspectMode(
@@ -1632,7 +1660,11 @@ int RuntimeMain(int argc, char** argv) {
         }};
 #elif defined(__SWITCH__)
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+#if defined(NSMBW_USE_DEKO3D)
+            {"auto", BACKEND_AUTO}, {"deko3d", BACKEND_DEKO3D},
+#else
             {"auto", BACKEND_AUTO}, {"deko3d", BACKEND_AUTO},
+#endif
         }};
 #elif defined(__ANDROID__)
         // NSMBW: OpenGL ES can't be picked for now (walled off for a later version); a saved
@@ -1835,6 +1867,9 @@ extern "C" __attribute__((visibility("default"))) int SDL_main(int argc, char** 
 extern "C" void switch_trace_mark(const char*);
 int main(int argc, char** argv) {
     switch_trace_mark("MAIN");
+#if defined(__SWITCH__)
+    switch_start_frame_log();
+#endif
     return RuntimeMain(argc, argv);
 }
 #endif

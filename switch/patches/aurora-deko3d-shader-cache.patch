@@ -1,0 +1,82 @@
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -736,7 +736,11 @@
+     return false;
+   }
+
++#if defined(NSMBW_USE_DEKO3D)
++  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=NORMAL;");
++#else
+   ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++#endif
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
+     pipeline_cache_abort();
+@@ -1184,6 +1188,9 @@
+   g_pipelineThreadEnd = false;
+   g_activeBackgroundPipelineWorkers = 0;
+   g_prewarmHeld = webgpu::g_holdPrewarmUntilShown;
++#if defined(NSMBW_USE_DEKO3D)
++  g_prewarmHeld = webgpu::g_backendType == wgpu::BackendType::Deko3d;
++#endif
+   if (const char* env = std::getenv("AURORA_PREWARM"); env != nullptr) {
+     if (std::strcmp(env, "hold") == 0) {
+       g_prewarmHeld = true;
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -966,7 +966,11 @@
+           "not safe on this device.");
+     }
+ #ifdef WEBGPU_DAWN
+-#if defined(__SWITCH__)
++#if defined(NSMBW_USE_DEKO3D)
++    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.isolationKey = nullptr});
++    cacheDescriptor.loadDataFunction = load_from_cache;
++    cacheDescriptor.storeDataFunction = store_to_cache;
++#elif defined(__SWITCH__)
+     // The port skips Dawn's on-disk pipeline cache: this Dawn version's cache callbacks take a
+     // typed userdata parameter that its own C++ helpers do not yet instantiate for this toolchain.
+     // The effect is only a slower first frame after each launch.
+@@ -1032,7 +1036,7 @@
+       }
+       Log.info("Graphics debug flags: {}", joined);
+     }
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+     constexpr bool kDawnCacheAvailable = false;
+ #else
+     constexpr bool kDawnCacheAvailable = true;
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -135,6 +135,12 @@
+   }
+ }
+
++#if defined(NSMBW_USE_DEKO3D)
++static constexpr const char* CachePragmas = "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=NORMAL;";
++#else
++static constexpr const char* CachePragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
++#endif
++
+ static bool cache_init_core() {
+   Log.debug("SQLite version {}", sqlite3_libversion());
+
+@@ -147,8 +153,7 @@
+     return false;
+   }
+
+-  // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
+-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++  ret = sqlite::exec(db, CachePragmas);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
+     return false;
+@@ -177,7 +182,7 @@
+       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
+       return false;
+     }
+-    ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++    ret = sqlite::exec(db, CachePragmas);
+     if (ret != SQLITE_OK) {
+       Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
+       return false;

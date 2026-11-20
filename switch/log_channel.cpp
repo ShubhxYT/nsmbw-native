@@ -7,6 +7,9 @@
 // The redirection is dup2 onto descriptors 1 and 2, so ordinary printf/fprintf in the runtime and
 // the translated game code reach the terminal without any changes on their side.
 
+#include "frame_log.h"
+#include "frame_profile.h"
+
 #include <switch.h>
 
 #include <arpa/inet.h>
@@ -14,9 +17,17 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <system_error>
+#include <thread>
 
 #include <fcntl.h>
 
@@ -60,13 +71,146 @@ int connect_log_channel() {
     return -1;
 }
 
-// Fallback when the development machine is not listening: keep the log on the SD card so a run can
-// be inspected even without the network.
+#if defined(NSMBW_USE_DEKO3D)
+constexpr const char* kBootLogPath = "sdmc:/switch/nsmbw/boot-deko3d.log";
+constexpr const char* kFrameLogPath = "sdmc:/switch/nsmbw/frame-deko3d.log";
+#else
+constexpr const char* kBootLogPath = "sdmc:/switch/nsmbw/boot.log";
+constexpr const char* kFrameLogPath = "sdmc:/switch/nsmbw/frame.log";
+#endif
+
+// Keep a log on the SD card when the development machine is not listening.
 int open_log_file() {
-    const char* path = "sdmc:/switch/nsmbw/boot.log";
-    ::remove(path);
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ::remove(kBootLogPath);
+    return open(kBootLogPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
+
+bool write_log_bytes(int fd, const char* data, size_t size) {
+    while (size != 0) {
+        const ssize_t written = ::write(fd, data, size);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            return false;
+        }
+        data += written;
+        size -= static_cast<size_t>(written);
+    }
+    return true;
+}
+
+class FrameLogWriter {
+public:
+    void Start() {
+        try {
+            worker_ = std::jthread([this](std::stop_token stop) { Run(stop); });
+        } catch (const std::system_error& error) {
+            std::fprintf(stderr, "nsmbw: frame log worker could not start (%s)\n", error.what());
+        }
+    }
+
+    bool Ready() const { return ready_.load(std::memory_order_acquire); }
+
+    void Append(const char* data, size_t size) {
+        std::lock_guard lock(mutex_);
+        auto& pending = batches_[writeSlot_];
+        if (size > pending.data.size() - pending.size) {
+            ++pending.dropped;
+            return;
+        }
+        std::memcpy(pending.data.data() + pending.size, data, size);
+        pending.size += size;
+    }
+
+private:
+    struct Batch {
+        std::array<char, 32 * 1024> data;
+        size_t size = 0;
+        unsigned dropped = 0;
+    };
+
+    void Run(std::stop_token stop) {
+        const int fd = ::open(kFrameLogPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            std::fprintf(stderr, "nsmbw: could not open %s\n", kFrameLogPath);
+            return;
+        }
+        constexpr char header[] = "nsmbw: background frame log\n";
+        if (!write_log_bytes(fd, header, sizeof(header) - 1)) {
+            ::close(fd);
+            std::fprintf(stderr, "nsmbw: could not initialize %s\n", kFrameLogPath);
+            return;
+        }
+        ready_.store(true, std::memory_order_release);
+        while (!stop.stop_requested()) {
+            svcSleepThread(250'000'000);
+            Flush(fd);
+        }
+        ready_.store(false, std::memory_order_release);
+        Flush(fd);
+        ::close(fd);
+    }
+
+    void Flush(int fd) {
+        unsigned slot;
+        {
+            std::lock_guard lock(mutex_);
+            slot = writeSlot_;
+            if (batches_[slot].size == 0 && batches_[slot].dropped == 0) {
+                return;
+            }
+            writeSlot_ ^= 1;
+        }
+        // The frame thread can queue another batch while this thread writes to the SD card.
+        auto& batch = batches_[slot];
+        if (!write_log_bytes(fd, batch.data.data(), batch.size)) {
+            std::fprintf(stderr, "nsmbw: could not write a batch to %s\n", kFrameLogPath);
+        } else if (batch.dropped != 0) {
+            char message[96];
+            const int length = std::snprintf(message, sizeof(message), "nsmbw: dropped %u frame log records\n",
+                                             batch.dropped);
+            if (length > 0) {
+                write_log_bytes(fd, message, static_cast<size_t>(length));
+            }
+        }
+        batch.size = 0;
+        batch.dropped = 0;
+    }
+
+    std::mutex mutex_;
+    std::array<Batch, 2> batches_{};
+    unsigned writeSlot_ = 0;
+    std::atomic_bool ready_{false};
+    std::jthread worker_;
+};
+
+FrameLogWriter& frame_log_writer() {
+    static FrameLogWriter writer;
+    return writer;
+}
+
+struct RenderTiming {
+    std::atomic<uint64_t> nanos{0};
+    std::atomic<uint64_t> calls{0};
+
+    void Add(uint64_t elapsed) {
+        nanos.fetch_add(elapsed, std::memory_order_relaxed);
+        calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    double TakeMillisecondsPerFrame(int frames) {
+        return nanos.exchange(0, std::memory_order_relaxed) / (1e6 * frames);
+    }
+
+    double TakeCallsPerFrame(int frames) {
+        return calls.exchange(0, std::memory_order_relaxed) / static_cast<double>(frames);
+    }
+};
+
+RenderTiming g_glReplay;
+RenderTiming g_glFinish;
+RenderTiming g_efbEncode;
 
 } // namespace
 
@@ -108,6 +252,61 @@ bool Open() {
 }
 
 } // namespace SwitchLog
+
+extern "C" void switch_start_frame_log() {
+    frame_log_writer().Start();
+}
+
+extern "C" void switch_frame_logf(const char* format, ...) {
+    auto& writer = frame_log_writer();
+    std::va_list args;
+    va_start(args, format);
+    if (!writer.Ready()) {
+        std::vfprintf(stderr, format, args);
+        va_end(args);
+        return;
+    }
+    char line[2048];
+    const int length = std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (length > 0) {
+        const size_t size = std::min(static_cast<size_t>(length), sizeof(line) - 1);
+        if (static_cast<size_t>(length) >= sizeof(line)) {
+            line[size - 1] = '\n';
+        }
+        writer.Append(line, size);
+    }
+}
+
+extern "C" bool switch_frame_profiling_enabled() {
+    static const bool enabled = [] {
+        const int fd = ::open("sdmc:/switch/nsmbw/frame-profile.flag", O_RDONLY);
+        if (fd < 0) {
+            return false;
+        }
+        close(fd);
+        std::fprintf(stderr, "nsmbw: frame profiling enabled\n");
+        return true;
+    }();
+    return enabled;
+}
+
+extern "C" void switch_record_gl_replay(uint64_t nanos) { g_glReplay.Add(nanos); }
+extern "C" void switch_record_gl_finish(uint64_t nanos) { g_glFinish.Add(nanos); }
+extern "C" void switch_record_efb_encode(uint64_t nanos) { g_efbEncode.Add(nanos); }
+
+extern "C" void switch_log_render_profile(int frames) {
+#if defined(NSMBW_USE_DEKO3D)
+    switch_frame_logf("[vi] render profile: deko3d, EFB copy encoding %.2f ms (%.1f copies) per frame\n",
+                      g_efbEncode.TakeMillisecondsPerFrame(frames), g_efbEncode.TakeCallsPerFrame(frames));
+#else
+    switch_frame_logf("[vi] render profile: GL command replay %.2f ms (%.1f batches), glFinish %.2f ms "
+                      "(%.1f waits), EFB copy encoding %.2f ms (%.1f copies) per frame\n",
+                      g_glReplay.TakeMillisecondsPerFrame(frames), g_glReplay.TakeCallsPerFrame(frames),
+                      g_glFinish.TakeMillisecondsPerFrame(frames), g_glFinish.TakeCallsPerFrame(frames),
+                      g_efbEncode.TakeMillisecondsPerFrame(frames), g_efbEncode.TakeCallsPerFrame(frames));
+#endif
+}
 
 // Runs before main(): the runtime writes to stdio during static initialisation in places.
 __attribute__((constructor)) static void switch_open_log_channel() { SwitchLog::Open(); }

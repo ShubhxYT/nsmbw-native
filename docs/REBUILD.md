@@ -4,10 +4,10 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status (2026-11-19).** The v1.0.4 NSP boots on the Switch Lite, reaches gameplay, and
-accepts controller input. The port creates Wii save data on hardware, and a save reload has been
-verified in Ryujinx. Frame times still limit playability on the Switch Lite at the original 1× render
-scale. See the [hardware measurements](#switch-lite-performance) for the remaining bottleneck.
+**Current status.** v1.0.8-r1 runs on the Switch Lite at 1× with working controls. The merged shader
+cache warmed 1,816 pipelines in 23.2 seconds with 4,740 cache hits out of 4,740 lookups. The sampled
+world map ran at about 19 FPS. The port creates Wii save data on hardware, and a save reload has
+been verified in Ryujinx. See the [hardware measurements](#switch-lite-performance).
 
 ---
 
@@ -323,10 +323,12 @@ Removed because they crash or conflict: `sys-ftpd`, `sys-ftpd-freeze`, `sys-ftp-
 disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the newest NSP, and the
 logs (`boot.log`, `init.log`).
 
-The latest package on the test console is `sdmc:/switch/nsmbw/nsmbw-v1.0.4-switch-performance.nsp`.
+The current installer on the console is
+`sdmc:/switch/nsmbw/nsmbw-v1.0.8-r1-switch-shader-warmup.nsp`. The older test installers are archived
+on the build machine. The v1.0.7 and v1.0.8 test builds share the application's title ID and save.
 
 Install is **human-only** (ES via DBI or Goldleaf); an agent cannot install an NSP remotely. Installs
-take several minutes for a ~64–69 MB package.
+take several minutes for the 73 MB package.
 
 ---
 
@@ -341,6 +343,9 @@ directory that does not survive a reboot.
 - `switch/patches/` — the external changes for Aurora, Dawn, and Abseil. Apply
   `aurora-switch-window.patch`, `aurora-switch-vertex-textures.patch`, and
   `aurora-switch-direct-efb-resolve.patch` in the Aurora tree. Apply the Dawn patches in the Dawn tree.
+  For the frame profiler, apply `aurora-switch-frame-profile.patch` and
+  `aurora-switch-efb-encode-timing.patch` in Aurora, and `runtime-switch-frame-profile.patch` from
+  the runtime checkout root. Apply `dawn-switch-gl-timing.patch` after the GLES fence fallback.
 - `switch/port/` — a mirror of every *runtime* source file that was modified, with a README naming what
   changed and why.
 - Build scripts: full build, PIC-library derivation, relink, incremental single-unit relink, packaging,
@@ -393,22 +398,27 @@ after removing the per-lookup writes produced about 44 KB of startup logs.
 
 ### Switch Lite performance
 
-Both hardware runs below used the original 1× render scale. The table compares medians from
-the recorded slow frames in each scene. The last three columns show where v1.0.4 spent that time.
+The table shows medians of the slow frames recorded on hardware on 2026-11-19. Boot used 1× in both
+runs. The v1.0.4 session changed to 0.5× in the settings menu before the first logged game setup
+sample. The effect of the patch on the later scenes at 1× remains unmeasured.
 
-| Scene | v1.0.3 frame | v1.0.4 frame | v1.0.4 before renderer finalization | v1.0.3 renderer finalization | v1.0.4 renderer finalization |
-|---|---:|---:|---:|---:|---:|
-| Boot (`0x000`) | 271.4 ms | 273.6 ms | 221.2 ms | 51.8 ms | 50.6 ms |
-| Game setup (`0x00A`) | 314.9 ms | 270.6 ms | 243.6 ms | 50.7 ms | 26.7 ms |
-| Cutscene (`0x008`) | 314.9 ms | 295.7 ms | 230.5 ms | 73.4 ms | 66.6 ms |
+| Scene | Build | Render scale | Whole frame | Before renderer finalization | Renderer finalization |
+|---|---|---:|---:|---:|---:|
+| Boot (`0x000`) | v1.0.3 | 1× | 271.4 ms | 212.3 ms | 51.8 ms |
+| Boot (`0x000`) | v1.0.4 | 1× | 273.6 ms | 221.2 ms | 50.6 ms |
+| Game setup (`0x00A`) | v1.0.3 | 1× | 314.9 ms | 259.6 ms | 50.7 ms |
+| Game setup (`0x00A`) | v1.0.4 | 0.5× | 270.6 ms | 243.6 ms | 26.7 ms |
+| Cutscene (`0x008`) | v1.0.3 | 1× | 314.9 ms | 240.7 ms | 73.4 ms |
+| Cutscene (`0x008`) | v1.0.4 | 0.5× | 295.7 ms | 230.5 ms | 66.6 ms |
 
-The [direct EFB resolve patch](../switch/patches/aurora-switch-direct-efb-resolve.patch) reads the
-embedded framebuffer after the draw pass and before the next clear on OpenGL ES. This skips an
-intermediate texture copy. In Ryujinx at 1×, the median logged slow frame in scene `0x005` fell from
-88 ms to 22 ms. On Switch Lite, the game setup measurements show a shorter renderer finalization
-step. The interval before that step remained around 244 ms, which explains why the player still
-experienced severe slowdown. The `game` field measures that interval in wall-clock time and includes
-guest execution, GX calls, and any waits. The log cannot attribute it to a specific subsystem yet.
+The direct EFB resolve reads the embedded framebuffer after the draw pass and before the next clear
+on OpenGL ES, skipping an intermediate texture copy. In Ryujinx at 1×, the median logged slow frame
+in scene `0x005` fell from 88 ms to 22 ms. [Direct EFB resolve patch](../switch/patches/aurora-switch-direct-efb-resolve.patch)
+
+On the Switch Lite, the matched 1× boot samples show nearly the same whole-frame time in both
+builds. In the v1.0.4 game setup samples, about 244 ms elapsed before renderer finalization even at
+0.5×. The log's `game` field measures that interval in wall-clock time and includes guest execution,
+GX calls, and waits. The cause within that interval remains open.
 
 Close the game before retrieving `sdmc:/switch/nsmbw/boot.log` over FTP. The log records up to 30
 slow frames per minute. Its two startup watchdog messages counted 26 guest frames at 12 seconds and
@@ -419,6 +429,109 @@ describe stalls. A sustained gameplay FPS average needs a continuous frame count
 **Tiny probe NSPs** are the fastest tool in the kit: a 300 KB package that reproduces one runtime
 behaviour (config load, `<iostream>`, thread-local, EGL surface) in ~40 seconds. Several of the hardest
 bugs in §4 were found this way rather than through the 64 MB game package.
+
+### Frame profiler
+
+Use handheld mode, 1× resolution and the standard Switch VSync mode in a separate Ryujinx profile.
+This matches the guest's display and input mode. Ryujinx runs the graphics workload through the
+host GPU, so use the Switch Lite to measure the hardware's frame times.
+
+With v1.0.5 or later, create an empty `sdmc:/switch/nsmbw/frame-profile.flag` before launching.
+Play a repeatable scene or course at 1× and close the game. In v1.0.6 the background writer batches
+frame reports and presentation hitch messages into `sdmc:/switch/nsmbw/frame.log`. Startup and error
+diagnostics remain in `boot.log`. The `fps` lines report two-second averages and the worst frame,
+with elapsed times for GX processing, renderer finalization, and pacing. The following lines report
+guest scheduler waits and audio activity.
+
+`Switch frame profile` reports how much time went into preparing the next frame and how long the
+presenting host thread was scheduled on a CPU. The `sampled` count indicates how many frame intervals
+had valid CPU ticks. This timing covers the presenting thread. Audio and other worker threads have
+their own counters. To disable the measurements for subsequent launches, remove the flag file.
+
+The v1.0.5 hardware run at 1× measured a median of 7.3 FPS across the stage's two-second windows.
+Renderer finalization took about 40 ms per frame, including about 37 ms of active CPU time on the
+presenting thread. v1.0.6 moved profiler writes off that thread. On the Lite, the matching stage's
+median improved to 12.7 FPS. The final cutscene still averaged 11.1 FPS over its last 30 seconds,
+with about 39 ms before renderer finalization and 51 ms in finalization per frame.
+
+### v1.0.7 Switch Lite renderer comparison
+
+Keep the stock clocks, 1× resolution, and the same save and scene for both runs. Play the same
+section for at least 30 seconds in each build, then close it from the HOME menu to release the
+files for FTP. Compare the final 30 seconds of that section, using the two-second FPS windows and
+their reported worst frame times.
+
+| Package | Renderer | Logs under `sdmc:/switch/nsmbw/` |
+|---|---|---|
+| `nsmbw-v1.0.7-a-switch-gles-timing.nsp` | Mesa OpenGL ES | `boot.log`, `frame.log` |
+| `nsmbw-v1.0.7-b-switch-deko3d.nsp` | Dawn/deko3d | `boot-deko3d.log`, `frame-deko3d.log` |
+
+Build A reports wall time spent replaying GL commands and waiting in the queue's `glFinish`
+fallback. Both report CPU time spent encoding EFB copies. These counters can overlap the other
+frame timings and should not be added to them. Build B also changes the Dawn revision, uses
+storage-buffer vertex fetch, and keeps Aurora's EFB snapshots, so this comparison measures the
+two renderer configurations as a whole.
+
+Build B uses [Dawn at `13abc3bc`](https://dawn.googlesource.com/dawn/+/13abc3bc8ea2d3c2050f9e77a12d012108ceee24),
+[the Switch backend patch](https://github.com/schuler-ph/nsmbw-switch/blob/502d87fc10111017dbaeb354738bcd4f2f8474db/aurora-main/cmake/patches/dawn-nintendo-switch-platform.patch),
+[the Deko3d and libuam compatibility patches](https://github.com/schuler-ph/nsmbw-switch/tree/502d87fc10111017dbaeb354738bcd4f2f8474db/projects/nsmbw/tools/patches),
+and [libuam at `f8c9eef0`](https://github.com/averne/libuam/tree/f8c9eef01ffe06334d530393d636d69e2b52744b).
+The dependency build uses devkitA64, libnx, libdeko3d, and the
+[Switch dependency recipe](https://github.com/schuler-ph/nsmbw-switch/blob/502d87fc10111017dbaeb354738bcd4f2f8474db/projects/nsmbw/tools/build-switch-deps.sh).
+Build Dawn as a PIC static library with deko3d enabled and the GL backends disabled. Enable the
+Tint WGSL reader and the WGSL and GLSL writers. The libnx portability fixes used in this build
+are pinned in [the WiiCompiled dependency recipe](https://github.com/yashin-sh/WiiCompiled-Switch/blob/b851db949cc9764c306877ed749bc70800f9658f/scripts/prepare-native-deko3d-deps.sh).
+
+Use separate scratch copies of the GLES object tree and packaging directory. Apply
+`aurora-switch-deko3d.patch` after the other Aurora patches, and use the runtime `main.cpp` mirror.
+Mount the dependency directory at `/deko` with Dawn source in `dawn/`, its CMake output in
+`dawn-build/`, and `libuam.a` in `uam/build-switch/`. Set `NSMBW_SWITCH_BACKEND=deko3d` and
+recompile every Aurora unit, runtime `main.cpp`, `switch/thread_tls.cpp`, and
+`switch/log_channel.cpp` with `switch/rebuild.sh --compile-only`. Recompile ImGui's WebGPU backend
+with the same Dawn headers before relinking with `--pack`. Set `NSMBW_LOG_HOST=` for SD logging.
+Build B gives default pthreads 1 MiB of stack for the Deko shader compiler.
+
+### v1.0.8 shader startup
+
+On the same Lite, Build B improved the sampled world-map median from 10.5 to 16.8 FPS, and
+its fastest window reached 34.5 FPS. The final stage still averaged 1.75 FPS over its last 30
+seconds, versus 1.64 FPS on Build A. Build B recorded a 27.6-second renderer frame when the
+world map first appeared with nine pipelines queued. The pipeline database could not be
+opened, and both builds wrote repeated GX debug diagnostics synchronously during the stage.
+
+v1.0.8 keeps deko3d and 1×. It filters debug messages on Switch, enables the existing Dawn
+cache callbacks, and warms known GX pipelines on the existing **Loading shaders** screen.
+The game can still encounter new GX configurations during later play, which are learned for
+the next launch. The screen waits up to three minutes before it lets startup continue.
+In Ryujinx, the empty-cache pass warmed all 1,816 bundled pipelines in 106.6 seconds. The
+reopen test on v1.0.8-r1 warmed the same pipelines in 2.8 seconds and hit all 4,740 blob-cache
+lookups. These measurements cover startup in the emulator.
+The seed comes from `runtime/assets/pipeline/initial_pipeline_cache.db`; copy it to the root
+of `/pack/romfs` and rebuild the NSP with the `1.0.8-r1` NACP display version. The two writable
+databases live in `sdmc:/switch/nsmbw/Cache/deko3d/`.
+
+Place [the pinned libnx SQLite VFS](https://github.com/nx-mod/sqlite-nx/blob/77103483f20795f744044f931596e7f4cc7858e0/source/nx-vfs.c)
+at `/deps/sqlite/nx-vfs.c` with the SQLite 3.46.1 amalgamation. Apply
+`sqlite-nx-ipc-path.patch` in that dependency directory so libnx receives its full-size
+IPC pathname buffer on cache reopen. Run
+`bash switch/build-sqlite-cache.sh` in the deko3d build container. Apply
+`aurora-deko3d-shader-cache.patch` after `aurora-switch-deko3d.patch` and
+`runtime-switch-shader-warmup.patch` from the runtime checkout root. Recompile the patched units,
+runtime `main.cpp`, and `switch/switch_appinit.cpp` before packaging.
+
+On the Switch Lite, the first cold boot reached 406 of 1,816 pipelines by the three-minute
+cutoff. Merging the same build's precompiled Dawn cache added 2,909 blobs and preserved all
+1,561 blobs already compiled on the Lite. The next launch warmed all 1,816 pipelines in 23.2
+seconds with 4,740 hits out of 4,740 cache lookups.
+
+| Warm-cache scene at 1× | Median FPS | Median frame time | Median main-thread CPU time before renderer finalization |
+|---|---:|---:|---:|
+| Playable stage (`0x005`, 121 windows) | 24.2 | 41.4 ms | 26.1 ms |
+| World map after the stage (`0x003`, 12 windows) | 19.1 | 52.4 ms | 36.7 ms |
+
+The final 30 seconds of the playable stage averaged 26.1 FPS. The frame profiler measures
+the game thread and the elapsed time of its finalization call. The deko3d render and present
+workers run asynchronously, so their CPU work and GPU completion require separate timings.
 
 ---
 

@@ -51,8 +51,21 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
     }
     request->entry = entry;
     request->argument = argument;
+#if defined(NSMBW_USE_DEKO3D)
+    // Tint and libuam compile shaders on std::thread workers with deep stacks.
+    pthread_attr_t shaderWorkerAttr;
+    const bool initialized = attr == nullptr && pthread_attr_init(&shaderWorkerAttr) == 0;
+    if (initialized && pthread_attr_setstacksize(&shaderWorkerAttr, 1024 * 1024) == 0) {
+        attr = &shaderWorkerAttr;
+    }
+#endif
     errno = 0;
     const int result = __real_pthread_create(thread, attr, &tls_start_routine, request);
+#if defined(NSMBW_USE_DEKO3D)
+    if (initialized) {
+        pthread_attr_destroy(&shaderWorkerAttr);
+    }
+#endif
     if (result != 0) {
         char line[96];
         std::snprintf(line, sizeof line, "PTHREAD_CREATE failed rc=%d errno=%d", result, errno);

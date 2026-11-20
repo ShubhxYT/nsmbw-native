@@ -1,0 +1,46 @@
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -18,6 +18,10 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++
++#if defined(__SWITCH__)
++#include "switch/frame_profile.h"
++#endif
+ #include <cmath>
+ #include <cstdlib>
+ #include <memory>
+@@ -1444,6 +1448,9 @@
+   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
+   // interpolation weight, so encode them on the native render and let replay slots sample them.
+   const bool encodeTextureBakes = interpolatedFrame < 0;
++#if defined(__SWITCH__)
++  const bool timeEfbCopies = switch_frame_profiling_enabled();
++#endif
+   for (u32 i = 0; i < renderPasses.size(); ++i) {
+     const auto& passInfo = renderPasses[i];
+     if (encodeTextureBakes) {
+@@ -1497,6 +1504,9 @@
+     }
+
+     if (passInfo.resolveTarget) {
++#if defined(__SWITCH__)
++      const auto copyStart = timeEfbCopies ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++#endif
+       const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
+       wgpu::Texture resolveSourceTexture = passInfo.copySourceTexture;
+       wgpu::TextureView resolveSourceView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView;
+@@ -1580,6 +1590,12 @@
+         const wgpu::Extent3D size{.width = patch.width, .height = patch.height, .depthOrArrayLayers = 1};
+         cmd.CopyTextureToTexture(&src, &dst, &size);
+       }
++#if defined(__SWITCH__)
++      if (timeEfbCopies) {
++        const auto elapsed = std::chrono::steady_clock::now() - copyStart;
++        switch_record_efb_encode(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
++      }
++#endif
+     }
+   }
+   if (finalize) {

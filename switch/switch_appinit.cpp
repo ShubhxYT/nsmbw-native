@@ -155,3 +155,9 @@ extern "C" void __appExit(void) {
     fsExit();
     smExit();
 }
+
+
+// The pipeline seed lives in the NSP's RomFS. Writable caches stay on the SD card.
+extern "C" bool switch_mount_shader_seed() {
+    return R_SUCCEEDED(romfsInit());
+}

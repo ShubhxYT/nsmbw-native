@@ -1,0 +1,66 @@
+--- a/nx-vfs.c
++++ b/nx-vfs.c
+@@ -18,9 +18,16 @@
+ // libnx takes paths relative to the filesystem root; accept the "sdmc:"
+ // device prefix newlib users naturally pass.
+-static const char * nxPath(const char * path) {
++static bool nxIpcPath(const char * path, char buffer[FS_MAX_PATH]) {
+     if (strncmp(path, "sdmc:", 5) == 0) {
+-        return path + 5;
+-    }
+-    return path;
++        path += 5;
++    }
++    const size_t length = strlen(path);
++    if (length >= FS_MAX_PATH) {
++        return false;
++    }
++    // libnx sends all FS_MAX_PATH bytes over IPC, even for a short pathname.
++    memset(buffer, 0, FS_MAX_PATH);
++    memcpy(buffer, path, length);
++    return true;
+ }
+
+@@ -133,5 +140,8 @@
+     }
+     if (file->deletePath) {
+-        fsFsDeleteFile(&fs, file->deletePath);
++        char ipcPath[FS_MAX_PATH];
++        if (nxIpcPath(file->deletePath, ipcPath)) {
++            fsFsDeleteFile(&fs, ipcPath);
++        }
+         sqlite3_free(file->deletePath);
+         file->deletePath = NULL;
+@@ -403,5 +413,10 @@
+     }
+
+-    path = nxPath(path);
++    char ipcPath[FS_MAX_PATH];
++    if (!nxIpcPath(path, ipcPath)) {
++        sqlite3_free(tmpBuf);
++        return SQLITE_CANTOPEN;
++    }
++    path = ipcPath;
+
+     // Create file if flag is set (fails harmlessly if it already exists)
+@@ -453,5 +468,9 @@
+ // Delete the given file
+ static int nxDelete(sqlite3_vfs * vfs, const char * path, int sync) {
+-    Result rc = fsFsDeleteFile(&fs, nxPath(path));
++    char ipcPath[FS_MAX_PATH];
++    if (!nxIpcPath(path, ipcPath)) {
++        return SQLITE_IOERR_DELETE;
++    }
++    Result rc = fsFsDeleteFile(&fs, ipcPath);
+
+     // Commit changes if flag set
+@@ -470,6 +489,7 @@
+ static int nxAccess(sqlite3_vfs * vfs, const char * path, int flags, int * out) {
+     FsDirEntryType type = FsDirEntryType_Dir;
+-    Result rc = fsFsGetEntryType(&fs, nxPath(path), &type);
+-    *out = (R_SUCCEEDED(rc) && type == FsDirEntryType_File) ? 1 : 0;
++    char ipcPath[FS_MAX_PATH];
++    *out = nxIpcPath(path, ipcPath) &&
++           R_SUCCEEDED(fsFsGetEntryType(&fs, ipcPath, &type)) && type == FsDirEntryType_File;
+     return SQLITE_OK;
+ }

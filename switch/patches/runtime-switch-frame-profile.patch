@@ -1,0 +1,268 @@
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -43,10 +43,18 @@
+ #include <android/choreographer.h>
+ #include <android/looper.h>
+ #include <dlfcn.h>
++#elif defined(__SWITCH__)
++#include <switch.h>
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
+ #endif
+
+ #include <aurora/aurora.h>
+ #include <aurora/gfx.h>
++
++#if !defined(__SWITCH__)
++#define RT_FRAME_LOGF RT_LOGF
++#endif
+
+ // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
+ extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
+@@ -966,17 +974,43 @@
+ // each frame's time went: the game (guest code and GX command building), aurora_end_frame (encoding,
+ // submission, and waiting on the GPU when it falls behind) and pacing to the retrace. A game share near
+ // the frame budget is CPU-bound; a large end_frame share is GPU-bound.
++#if defined(__SWITCH__)
++struct FrameCpuSample {
++    uint64_t ticks = 0;
++    bool valid = false;
++};
++
++static FrameCpuSample ReadFrameCpuSample() {
++    FrameCpuSample sample;
++    sample.valid = R_SUCCEEDED(svcGetInfo(&sample.ticks, InfoType_ThreadTickCount, CUR_THREAD_HANDLE,
++                                         TickCountInfo_Total));
++    return sample;
++}
++#endif
++
+ struct FrameTimes {
+     Clock::time_point windowStart{};
+     Clock::time_point lastPresentEnd{};
+     double gameMs = 0, endFrameMs = 0, paceMs = 0, worstMs = 0, sumSq = 0;
+     int slow = 0;
+     int frames = 0;
++#if defined(__SWITCH__)
++    std::thread::id lastSampleThread;
++    FrameCpuSample lastCpuSample;
++    double gameCpuMs = 0;
++    double rendererAndPaceCpuMs = 0;
++    double prepareMs = 0;
++    int cpuFrames = 0;
++#endif
+ };
+
+ static bool LogFpsEnabled() {
++#if defined(__SWITCH__)
++    return switch_frame_profiling_enabled();
++#else
+     static const bool on = std::getenv("NSMBW_LOG_FPS") != nullptr;
+     return on;
++#endif
+ }
+
+ // The scheduler's idle time (no guest thread runnable, though its idle loop runs the audio DMA
+@@ -1153,6 +1187,10 @@
+     }
+
+     const Clock::time_point endFrameStart = Clock::now();
++#if defined(__SWITCH__)
++    const bool profileFrame = presentedXfb && LogFpsEnabled();
++    const FrameCpuSample beforeRenderer = profileFrame ? ReadFrameCpuSample() : FrameCpuSample{};
++#endif
+     aurora_end_frame();
+     const Clock::time_point paceStart = Clock::now();
+     if (paceThisFrame) {
+@@ -1160,6 +1198,10 @@
+         std::lock_guard<std::mutex> lock(g_viMutex);
+         s_lastPacedRetraceCount = g_vi.retraceCount;
+     }
++    const Clock::time_point now = Clock::now();
++#if defined(__SWITCH__)
++    const FrameCpuSample afterRenderer = profileFrame ? ReadFrameCpuSample() : FrameCpuSample{};
++#endif
+     // Always on: a frame that took over 20 ms (a dropped frame at 60) goes to the log with where the
+     // time went, so a report of drops on someone's machine comes with its cause. At most 30 a minute.
+     // Battery Saver presents every other frame, so there a drop is a frame over 37 ms.
+@@ -1190,7 +1232,6 @@
+         s_lastFaults = faults;
+         s_lastUser = user;
+         s_lastKernel = kernel;
+-        const Clock::time_point now = Clock::now();
+         if (s_lastEnd != Clock::time_point{}) {
+             const double frame = ms(now - s_lastEnd);
+             if (now - s_windowStart > std::chrono::minutes(1)) {
+@@ -1200,7 +1241,7 @@
+             if (frame > slowFrameMs && frame < 2000.0 && s_logged++ < 30) {
+                 uint32_t sceneWord = 0;
+                 Memory::TryRead32(0x80428730u, sceneWord);
+-                RT_LOGF(RT_TAG_VI,
++                RT_FRAME_LOGF(RT_TAG_VI,
+                         "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, disc %.2f in %u reads), present %.2f, "
+                         "end_frame %.2f, pace %.2f; thread cpu %.1f user + %.1f kernel, %u page faults\n",
+                         frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, dvdMs, frameReads,
+@@ -1211,7 +1252,18 @@
+         s_lastEnd = now;
+     }
+     if (LogFpsEnabled() && presentedXfb) {
+-        const Clock::time_point now = Clock::now();
++#if defined(__SWITCH__)
++        const auto thread = std::this_thread::get_id();
++        if (thread == times.lastSampleThread && times.lastCpuSample.valid && beforeRenderer.valid &&
++            afterRenderer.valid && times.lastCpuSample.ticks <= beforeRenderer.ticks &&
++            beforeRenderer.ticks <= afterRenderer.ticks) {
++            times.gameCpuMs += armTicksToNs(beforeRenderer.ticks - times.lastCpuSample.ticks) / 1e6;
++            times.rendererAndPaceCpuMs += armTicksToNs(afterRenderer.ticks - beforeRenderer.ticks) / 1e6;
++            ++times.cpuFrames;
++        }
++        times.lastSampleThread = thread;
++        times.lastCpuSample = afterRenderer;
++#endif
+         if (times.lastPresentEnd != Clock::time_point{}) {
+             const double game = ms(presentStart - times.lastPresentEnd) + ms(endFrameStart - presentStart);
+             const double frame = ms(now - times.lastPresentEnd);
+@@ -1234,7 +1286,7 @@
+             const uint64_t unmerged = AuroraTakeUnmergedDraws();
+             uint64_t copies = 0, creates = 0;
+             AuroraTakeCopyStats(&copies, &creates);
+-            RT_LOGF(RT_TAG_VI,
++            RT_FRAME_LOGF(RT_TAG_VI,
+                     "fps %.1f: game %.2f ms (gx %.2f ms, lock wait %.2f ms, %.0f draws, %.0f unmerged, %.1f copies, "
+                     "%.1f new copy textures), end_frame %.2f ms, pace %.2f ms, worst frame %.1f ms, jitter %.2f ms, "
+                     "%d over %.0f ms\n",
+@@ -1243,6 +1295,18 @@
+                     copies / n, creates / n, times.endFrameMs / n, times.paceMs / n, times.worstMs,
+                     std::sqrt(std::max(0.0, times.sumSq / n - (window / n) * (window / n))), times.slow,
+                     slowFrameMs);
++#if defined(__SWITCH__)
++            uint32_t sceneWord = 0;
++            Memory::TryRead32(0x80428730u, sceneWord);
++            RT_FRAME_LOGF(RT_TAG_VI,
++                    "Switch frame profile scene 0x%03X: next-frame prepare %.2f ms, host thread active "
++                    "%.2f ms before end_frame, %.2f ms in end_frame and pace (%d/%d frames sampled)\n",
++                    sceneWord & 0xFFFFu, times.prepareMs / n,
++                    times.cpuFrames ? times.gameCpuMs / times.cpuFrames : 0.0,
++                    times.cpuFrames ? times.rendererAndPaceCpuMs / times.cpuFrames : 0.0,
++                    times.cpuFrames, times.frames);
++            switch_log_render_profile(times.frames);
++#endif
+             const uint32_t waits = g_idleWaits.exchange(0, std::memory_order_relaxed);
+             const uint32_t retraceEnds = g_idleRetraceEnds.exchange(0, std::memory_order_relaxed);
+             static uint32_t s_windowRetraceCount = 0;
+@@ -1251,7 +1315,7 @@
+                 std::lock_guard<std::mutex> lock(g_viMutex);
+                 retraceCount = g_vi.retraceCount;
+             }
+-            RT_LOGF(RT_TAG_VI,
++            RT_FRAME_LOGF(RT_TAG_VI,
+                     "idle %.2f ms a frame in %.1f waits, %.0f%% of them ending at a retrace; %.2f retraces a frame\n",
+                     g_idleNanos.exchange(0, std::memory_order_relaxed) / 1e6 / n, waits / n,
+                     waits ? 100.0 * retraceEnds / waits : 0.0,
+@@ -1275,14 +1339,14 @@
+                 std::snprintf(part, sizeof(part), " %08X %.2f ms;", threads[i].first, threads[i].second / 1e6 / n);
+                 waiters += part;
+             }
+-            RT_LOGF(RT_TAG_VI, "idle ended by (a frame):%s thread that waited:%s\n", enders.c_str(), waiters.c_str());
++            RT_FRAME_LOGF(RT_TAG_VI, "idle ended by (a frame):%s thread that waited:%s\n", enders.c_str(), waiters.c_str());
+             std::vector<std::pair<uint64_t, MainWait>> mainWaits(g_mainWaits.begin(), g_mainWaits.end());
+             std::sort(mainWaits.begin(), mainWaits.end(),
+                       [](const auto& a, const auto& b) { return a.second.blocked > b.second.blocked; });
+             for (size_t i = 0; i < mainWaits.size() && i < 5; ++i) {
+                 const MainWait& wait = mainWaits[i].second;
+                 const uint32_t lr = static_cast<uint32_t>(mainWaits[i].first);
+-                RT_LOGF(RT_TAG_VI, "main thread slept %.2f ms a frame (%.2f idle, %.1f times) on queue %08X from %08X\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "main thread slept %.2f ms a frame (%.2f idle, %.1f times) on queue %08X from %08X\n",
+                         wait.blocked / 1e6 / n, wait.idle / 1e6 / n, wait.count / n,
+                         static_cast<uint32_t>(mainWaits[i].first >> 32), lr);
+             }
+@@ -1291,21 +1355,21 @@
+                 uint32_t mixes = 0;
+                 int mixCpu = -1;
+                 AxDspHle::TakeMixStats(&mixNanos, &mixWaitNanos, &mixes, &mixCpu);
+-                RT_LOGF(RT_TAG_VI, "audio mix: %.2f ms a frame in %.1f mixes (%.3f ms each, last on cpu %d), guest waited %.2f ms\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "audio mix: %.2f ms a frame in %.1f mixes (%.3f ms each, last on cpu %d), guest waited %.2f ms\n",
+                         mixNanos / 1e6 / n, mixes / n, mixes ? mixNanos / 1e6 / mixes : 0.0, mixCpu,
+                         mixWaitNanos / 1e6 / n);
+                 uint64_t steps[7] = {};
+                 OS_HLE_TakeIdleSteps(steps);
+-                RT_LOGF(RT_TAG_VI, "retrace poll sleeps: %.2f ms a frame in %.1f (%.1f begun)\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "retrace poll sleeps: %.2f ms a frame in %.1f (%.1f begun)\n",
+                         g_retracePollSleepNanos.exchange(0) / 1e6 / n, g_retracePollSleeps.exchange(0) / n,
+                         g_retracePollEntries.exchange(0) / n);
+-                RT_LOGF(RT_TAG_VI, "idle loop (ms a frame): sleep timers %.2f, audio %.2f, retrace %.2f, fiber timers %.2f, "
++                RT_FRAME_LOGF(RT_TAG_VI, "idle loop (ms a frame): sleep timers %.2f, audio %.2f, retrace %.2f, fiber timers %.2f, "
+                         "alarms %.2f, wait %.2f; %.1f passes\n", steps[0] / 1e6 / n, steps[1] / 1e6 / n, steps[2] / 1e6 / n,
+                         steps[3] / 1e6 / n, steps[4] / 1e6 / n, steps[5] / 1e6 / n, steps[6] / n);
+                 uint64_t pushNanos = 0, callbackNanos = 0;
+                 uint32_t blocks = 0;
+                 Audio_HLE_TakeTickStats(&pushNanos, &callbackNanos, &blocks);
+-                RT_LOGF(RT_TAG_VI, "audio blocks: %.1f a frame, speaker push %.2f ms, AI callback %.2f ms (%.3f ms each)\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "audio blocks: %.1f a frame, speaker push %.2f ms, AI callback %.2f ms (%.3f ms each)\n",
+                         blocks / n, pushNanos / 1e6 / n, callbackNanos / 1e6 / n,
+                         blocks ? callbackNanos / 1e6 / blocks : 0.0);
+             }
+@@ -1314,6 +1378,10 @@
+             g_idleCountByEnder.fill(0);
+             g_idleByThread.clear();
+             times = FrameTimes{};
++#if defined(__SWITCH__)
++            times.lastSampleThread = thread;
++            times.lastCpuSample = afterRenderer;
++#endif
+             times.windowStart = now;
+             times.lastPresentEnd = now;
+         }
+@@ -1328,10 +1396,18 @@
+     }
+     // Pre-warm the next frame so subsequent GX work has a valid frame context.
+     {
++#if defined(__SWITCH__)
++        const Clock::time_point prepareStart = profileFrame ? Clock::now() : Clock::time_point{};
++#endif
+         UpdateAuroraAndProcessEvents();
+         if (BeginAuroraFrame()) {
+             g_auroraFrameActive.store(true, std::memory_order_release);
+         }
++#if defined(__SWITCH__)
++        if (profileFrame) {
++            times.prepareMs += ms(Clock::now() - prepareStart);
++        }
++#endif
+     }
+ }
+
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -1,3 +1,10 @@
++#if defined(__SWITCH__)
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
++#else
++#define RT_FRAME_LOGF RT_LOGF
++#endif
++
+ #include "netplay/game_layout.h"
+ #include "netplay_lobby.h"
+ #include "netplay_ui.h"
+@@ -1460,7 +1467,11 @@
+         g_frameTimeNext = (g_frameTimeNext + 1) % kFrameTimeCount;
+         // NSMBW_LOG_FPS: what the graph shows, every 2 s: the presented frames' times, which can be
+         // uneven while the game's own frames (vi's fps line) are not.
++#if defined(__SWITCH__)
++        static const bool s_log = switch_frame_profiling_enabled();
++#else
+         static const bool s_log = std::getenv("NSMBW_LOG_FPS") != nullptr;
++#endif
+         if (s_log && dt > 0.0f && dt < 1.0f) {
+             static float s_window = 0, s_worst = 0, s_sumSq = 0;
+             static int s_frames = 0, s_long = 0, s_short = 0;
+@@ -1473,7 +1484,7 @@
+             s_short += frameMs < 12.0f ? 1 : 0;
+             if (s_window >= 2.0f) {
+                 const float mean = s_window * 1000.0f / s_frames;
+-                RT_LOGF(RT_TAG_RUNTIME,
++                RT_FRAME_LOGF(RT_TAG_RUNTIME,
+                         "graph: %d frames, mean %.2f ms, jitter %.2f ms, worst %.1f ms, %d over 20 ms, %d under 12 ms\n",
+                         s_frames, mean, std::sqrt(std::max(0.0f, s_sumSq / s_frames - mean * mean)), s_worst, s_long,
+                         s_short);

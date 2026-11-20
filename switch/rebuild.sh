@@ -1,7 +1,7 @@
 #!/bin/bash
 # Incremental rebuild: recompile the named translation units, relink, verify, package.
 #
-#   ./rebuild.sh [src/relative/unit.cpp ...] [--pack]
+#   ./rebuild.sh [src/relative/unit.cpp ...] [--compile-only | --pack]
 #
 # With no arguments it only relinks. Unit paths are relative to /src (the mounted working tree),
 # e.g. switch/log_channel.cpp or runtime/src/main.cpp. The object name follows build-pie.sh:
@@ -11,11 +11,31 @@ set -euo pipefail
 DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
 CXX="$DEVKITPRO/devkitA64/bin/aarch64-none-elf-g++"
 CC="$DEVKITPRO/devkitA64/bin/aarch64-none-elf-gcc"
-DAWN=/deps/dawn-src
 OBJ=/src/obj-pie
 PACK=/pack
 TID=${TID:-01004E53A1B50000}
 NAME=${NAME:-NSMBW}
+backend_flags=()
+backend_archives=()
+case "${NSMBW_SWITCH_BACKEND:-gles}" in
+    gles)
+        DAWN=/deps/dawn-src
+        DAWN_BUILD="$DAWN/build-switch"
+        aurora_backend_flags=(-DDAWN_ENABLE_BACKEND_OPENGL -DDAWN_ENABLE_BACKEND_OPENGLES)
+        graphics_libs=(-lnx -lEGL -lGLESv2 -lglapi)
+        graphics_tail=(-ldrm_nouveau -lnx)
+        ;;
+    deko3d)
+        DAWN=/deko/dawn
+        DAWN_BUILD=/deko/dawn-build
+        backend_flags=(-DNSMBW_USE_DEKO3D)
+        backend_archives=(/deko/uam/build-switch/libuam.a)
+        aurora_backend_flags=(-DDAWN_ENABLE_BACKEND_DEKO3D)
+        graphics_libs=(-ldeko3d -lnx)
+        graphics_tail=(-lnx)
+        ;;
+    *) echo "Unknown Switch renderer: $NSMBW_SWITCH_BACKEND" >&2; exit 2 ;;
+esac
 SPECS=${SPECS:-/src/switch/switch-rw.specs}
 if [ ! -f "$SPECS" ]; then
     echo "Missing linker specs: $SPECS. Run /src/switch/make-rw-ldscript.py first." >&2
@@ -34,17 +54,23 @@ INCLUDES="-isystem $DEVKITPRO/libnx/include -isystem $DEVKITPRO/portlibs/switch/
   -isystem /deps/SDL/include -isystem /deps/imgui -isystem /deps/fmt/include
   -isystem /deps/xxhash -isystem /deps/tracy/public -isystem /deps/absl
   -isystem /deps/sqlite -isystem /deps/png -isystem /deps/zlib
-  -isystem $DAWN/include -isystem $DAWN/build-switch/gen/include"
+  -isystem $DAWN/include -isystem $DAWN_BUILD/gen/include"
 DEFINES="-D__SWITCH__ -DTARGET_PC -DCRYPTOPP_DISABLE_ASM"
 
 pack=0
+compile_only=0
 units=()
 for arg in "$@"; do
     case "$arg" in
         --pack) pack=1 ;;
+        --compile-only) compile_only=1 ;;
         *) units+=("$arg") ;;
     esac
 done
+if [ "$compile_only" = 1 ] && [ "$pack" = 1 ]; then
+    echo "--compile-only and --pack cannot be combined" >&2
+    exit 2
+fi
 
 for unit in "${units[@]:-}"; do
     [ -z "$unit" ] && continue
@@ -53,7 +79,7 @@ for unit in "${units[@]:-}"; do
         switch/*)
             base=$(basename "$unit" .cpp)
             # shellcheck disable=SC2086
-            $CXX -std=gnu++20 -D__SWITCH__ "${log_flags[@]}" -fPIE -c -O2 -fexceptions -frtti \
+            $CXX -std=gnu++20 -D__SWITCH__ "${log_flags[@]}" "${backend_flags[@]}" -fPIE -c -O2 -fexceptions -frtti \
                 -I/src/switch -isystem $DEVKITPRO/libnx/include -isystem /deps/SDL/include \
                 -isystem /src/runtime/include "$unit" -o "$OBJ/$base.o"
             ;;
@@ -61,19 +87,21 @@ for unit in "${units[@]:-}"; do
             rel=${unit#runtime/src/}
             base=$(echo "$rel" | sed 's|/|_|g').o
             # shellcheck disable=SC2086
-            $CXX -std=gnu++20 $DEFINES -fPIE -c -O2 -fexceptions -frtti $INCLUDES "$unit" -o "$OBJ/$base"
+            $CXX -std=gnu++20 $DEFINES "${backend_flags[@]}" -fPIE -c -O2 -fexceptions -frtti \
+                $INCLUDES "$unit" -o "$OBJ/$base"
             ;;
         aurora-main/*)
             rel=${unit#aurora-main/lib/}
             base="aur_${rel//\//_}.o"
             # shellcheck disable=SC2086
-            $CXX -std=gnu++20 $DEFINES -DAURORA_ENABLE_GX -DWEBGPU_DAWN \
-                -DDAWN_ENABLE_BACKEND_OPENGL -DDAWN_ENABLE_BACKEND_OPENGLES \
+            $CXX -std=gnu++20 $DEFINES "${backend_flags[@]}" -DAURORA_ENABLE_GX -DWEBGPU_DAWN \
+                "${aurora_backend_flags[@]}" \
                 -fPIE -c -O2 -fexceptions -frtti $INCLUDES "$unit" -o "$OBJ/aurora/$base"
             ;;
         *) echo "unknown unit prefix: $unit" >&2; exit 2 ;;
     esac
 done
+if [ "$compile_only" = 1 ]; then exit 0; fi
 
 echo "== link =="
 OBJS=$(ls "$OBJ"/*.o | grep -v "product_retro_rewind_product")
@@ -94,10 +122,10 @@ if ! "$CXX" -specs="$SPECS" -Wl,-z,nopack-relative-relocs -Wl,-z,notext \
     "${wrap_flags[@]}" \
     -o /src/wiicompiled.elf \
     $OBJS $LIBS $ABSL "$OBJ"/fmt/*.o \
-    "$DAWN"/build-switch/src/dawn/native/libwebgpu_dawn.a /src/switch/execvp_stub.S \
-    -L$DEVKITPRO/libnx/lib -L$DEVKITPRO/portlibs/switch/lib -lnx -lEGL -lGLESv2 -lglapi \
+    "$DAWN_BUILD"/src/dawn/native/libwebgpu_dawn.a "${backend_archives[@]}" /src/switch/execvp_stub.S \
+    -L$DEVKITPRO/libnx/lib -L$DEVKITPRO/portlibs/switch/lib "${graphics_libs[@]}" \
     ${RUNTIME_LIBS:--L$DEVKITPRO/devkitA64/aarch64-none-elf/lib -lstdc++ -lc -lm -lgcc -lsysbase} \
-    -ldrm_nouveau -lnx > /src/link-rebuild.log 2>&1; then
+    "${graphics_tail[@]}" > /src/link-rebuild.log 2>&1; then
     tail -20 /src/link-rebuild.log >&2
     exit 1
 fi

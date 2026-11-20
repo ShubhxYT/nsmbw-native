@@ -1,0 +1,59 @@
+--- a/src/dawn/native/opengl/QueueGL.cpp
++++ b/src/dawn/native/opengl/QueueGL.cpp
+@@ -28,6 +28,7 @@
+ #include "src/dawn/native/opengl/QueueGL.h"
+
+ #include <algorithm>
++#include <chrono>
+ #include <vector>
+
+ #include "dawn/platform/DawnPlatform.h"
+@@ -47,6 +48,12 @@
+ #include "src/utils/numeric.h"
+ #include "src/utils/span.h"
+
++#if defined(__SWITCH__)
++extern "C" bool switch_frame_profiling_enabled();
++extern "C" void switch_record_gl_replay(uint64_t nanos);
++extern "C" void switch_record_gl_finish(uint64_t nanos);
++#endif
++
+ namespace dawn::native::opengl {
+
+ namespace {
+@@ -90,9 +97,20 @@
+     return device->EnqueueAndFlushGL([commands](const OpenGLFunctions& gl) -> MaybeError {
+         {
+             TRACE_EVENT(DAWN_TRACE_CATEGORY("recording"), "CommandBufferGL::RecordCommands");
++#if defined(__SWITCH__)
++            using Clock = std::chrono::steady_clock;
++            const bool profile = switch_frame_profiling_enabled();
++            const auto replayStart = profile ? Clock::now() : Clock::time_point{};
++#endif
+             for (CommandBufferBase* commandBuffer : commands) {
+                 DAWN_TRY(ToBackend(commandBuffer)->RecordCommands(gl));
+             }
++#if defined(__SWITCH__)
++            if (profile) {
++                switch_record_gl_replay(
++                    std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - replayStart).count());
++            }
++#endif
+         }
+         // Results of the submitted work can become visible to the application (e.g. on present).
+         DAWN_TRY(
+@@ -252,7 +270,14 @@
+         SubmitMode::Passive, [&](const OpenGLFunctions& gl) -> MaybeError {
+ #if defined(__SWITCH__)
+             if (mEGLSyncType == EGL_NONE) {
++                using Clock = std::chrono::steady_clock;
++                const bool profile = switch_frame_profiling_enabled();
++                const auto waitStart = profile ? Clock::now() : Clock::time_point{};
+                 DAWN_GL_TRY(gl, Finish());
++                if (profile) {
++                    switch_record_gl_finish(
++                        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - waitStart).count());
++                }
+                 IncrementLastSubmittedCommandSerial();
+                 mHasPendingUnsignaledCommands = false;
+                 return {};

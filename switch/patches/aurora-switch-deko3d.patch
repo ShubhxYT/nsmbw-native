@@ -1,0 +1,156 @@
+--- a/include/aurora/aurora.h
++++ b/include/aurora/aurora.h
+@@ -22,6 +22,7 @@
+   BACKEND_OPENGLES,
+   BACKEND_WEBGPU,
+   BACKEND_NULL,
++  BACKEND_DEKO3D,
+ } AuroraBackend;
+
+ typedef enum {
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -623,12 +623,17 @@
+     return "WebGPU";
+   case BACKEND_NULL:
+     return "Null";
++  case BACKEND_DEKO3D:
++    return "deko3d";
+   }
+   return "Unknown";
+ }
+
+ #ifdef AURORA_ENABLE_GX
+ constexpr std::array PreferredBackendOrder{
++#ifdef NSMBW_USE_DEKO3D
++    BACKEND_DEKO3D,
++#endif
+ #ifdef ENABLE_BACKEND_WEBGPU
+     BACKEND_WEBGPU,
+ #endif
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -683,6 +683,10 @@
+     return wgpu::BackendType::OpenGL;
+   case BACKEND_OPENGLES:
+     return wgpu::BackendType::OpenGLES;
++#ifdef NSMBW_USE_DEKO3D
++  case BACKEND_DEKO3D:
++    return wgpu::BackendType::Deko3d;
++#endif
+   default:
+     return wgpu::BackendType::Null;
+   }
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -129,7 +129,7 @@
+ static ByteBuffer g_storage;
+ static ByteBuffer g_textureUpload;
+ wgpu::Buffer g_vertexBuffer;
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+ static wgpu::Texture g_vertexWords;
+ static wgpu::Texture g_arrayWords;
+ constexpr uint32_t VertexWordRowBytes = VertexWordTextureWidth * sizeof(uint32_t);
+@@ -941,7 +941,7 @@
+   };
+   createBuffer(g_uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
+                "Shared Uniform Buffer");
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   const auto createWordTexture = [](uint64_t size, const char* label) {
+     const wgpu::TextureDescriptor descriptor{
+         .label = label,
+@@ -977,7 +977,7 @@
+         wgpu::BindGroupLayoutEntry{
+             .binding = 0,
+             .visibility = wgpu::ShaderStage::Vertex,
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+             .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
+ #else
+             .buffer =
+@@ -990,7 +990,7 @@
+         wgpu::BindGroupLayoutEntry{
+             .binding = 1,
+             .visibility = wgpu::ShaderStage::Vertex,
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+             .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
+ #else
+             .buffer =
+@@ -1006,7 +1006,7 @@
+         .entries = layoutEntries.data(),
+     };
+     g_staticBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+     const auto vertices = g_vertexWords.CreateView();
+     const auto arrays = g_arrayWords.CreateView();
+     const std::array entries{
+@@ -1092,7 +1092,7 @@
+   g_uniformBuffer = {};
+   g_indexBuffer = {};
+   g_storageBuffer = {};
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   g_vertexWords = {};
+   g_arrayWords = {};
+ #endif
+@@ -1276,7 +1276,7 @@
+     bufferOffset += size;
+     return writeSize;
+   };
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   const auto writeWords = [&](ByteBuffer& buf, const wgpu::Texture& texture, uint64_t size) {
+     const auto writeSize = buf.size();
+     if (writeSize > 0) {
+@@ -1298,14 +1298,14 @@
+   s_mappingState.reset();
+   g_stats.drawCallCount = g_drawCallCount;
+   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   g_stats.lastVertSize = writeWords(g_verts, g_vertexWords, VertexBufferSize);
+ #else
+   g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
+ #endif
+   g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
+   g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   g_stats.lastStorageSize = writeWords(g_storage, g_arrayWords, StorageBufferSize);
+ #else
+   g_stats.lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
+--- a/lib/gfx/common.hpp
++++ b/lib/gfx/common.hpp
+@@ -228,7 +228,7 @@
+ inline constexpr bool UseTextureBuffer = false;
+ inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
+ inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+ inline constexpr uint32_t VertexWordTextureWidth = 1024;
+ #endif
+ inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1015,7 +1015,7 @@
+   // Storage reads for vertex pulling. The GPU compatibility path guards each with a bounds check
+   // that valid data never trips; its presence keeps Adreno's optimizer from the transformation that
+   // scrambles skinned vertices (upstream aurora #202).
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   std::string uniformPre = fmt::format(R"(
+ fn load_word(source: u32, word_idx: u32) -> u32 {{
+     let coords = vec2i(i32(word_idx % {0}u), i32(word_idx / {0}u));
+@@ -2241,7 +2241,7 @@
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentReturnType,
+                                         fragmentReturn);
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
+   // Keep the same attribute decoders while reading words through integer texture fetches.
+   const auto replace = [&](std::string_view from, std::string_view to) {
+     for (size_t pos = 0; (pos = shaderSource.find(from, pos)) != std::string::npos; pos += to.size()) {
