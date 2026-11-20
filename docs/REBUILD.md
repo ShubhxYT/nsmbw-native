@@ -874,7 +874,28 @@ and relaunch to restore the 16 KiB threshold. The boot log confirms the active t
 
 Ryujinx displayed World 1-1 at 1× with the 4 KiB threshold. The new counters recorded
 26–36 worker batches per frame and 0.43–0.45 ms of inline decoding in sample course
-windows. Switch Lite performance and the 16 KiB comparison are pending.
+windows.
+
+The Lite capture confirmed the 4 KiB threshold and 1× render scale. The two played
+courses averaged 54.5 FPS over 62.4 seconds and 55.5 FPS over 86.5 seconds.
+
+| Last 30 seconds of course play | v1.0.22 | v1.0.23 first course | v1.0.23 second course |
+| --- | ---: | ---: | ---: |
+| Average FPS | 54.2 | 54.9 | 57.7 |
+| Lowest two-second average | 47.9 FPS | 47.4 FPS | 42.9 FPS |
+| Frames over 20 ms | 18.8% | 16.5% | 3.8% |
+| Longest frame | 73.8 ms | 82.1 ms | 112.4 ms |
+| Median FIFO synchronization wait per frame | 0.37 ms | 0.00 ms | 0.02 ms |
+
+The last seven two-second windows of the second course averaged 60 FPS. Its final
+30 seconds issued fewer GX draws than v1.0.22, with medians of 1,733 and 2,296 draws
+per frame. Across course windows restricted to 1,800–3,400 draws and 24–31 copies per
+frame, FPS ranged from 52.6–53.8 across the two v1.0.23 runs, versus 53.2 on v1.0.22.
+The 16 KiB same-build comparison is still pending.
+
+The slowest full-course window on v1.0.23 averaged 36.6 FPS with 25.71 ms of game-thread
+CPU time, 0.39 ms of FIFO wait and 0.07 ms of renderer preparation wait per frame.
+The game thread still exceeds the 16.67 ms budget in busy scenes.
 
 ---
 
