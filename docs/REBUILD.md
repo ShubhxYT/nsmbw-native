@@ -319,13 +319,16 @@ Sysmodules present: `sys-patch`, `sys-ftpd-10k`, `Tesla`.
 Removed because they crash or conflict: `sys-ftpd`, `sys-ftpd-freeze`, `sys-ftp-breeze`, and
 **`sys-hidplus`** (a Windows-era build that crashes boot on 20.4.0 — do not re-enable it).
 
-**SD card layout under `sdmc:/switch/nsmbw/`:** the config file, `sys/` and `files/` from the extracted
+**SD card layout under `sdmc:/switch/aaa-nsmbw/` (v1.0.10 and later):** the config file, `sys/` and `files/` from the extracted
 disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the newest NSP, and the
 logs (`boot.log`, `init.log`).
 
-The current installer on the console is
-`sdmc:/switch/nsmbw/nsmbw-v1.0.8-r1-switch-shader-warmup.nsp`. The older test installers are archived
-on the build machine. The v1.0.7 and v1.0.8 test builds share the application's title ID and save.
+The current installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.12-switch.nsp`.
+The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
+NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
+On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
+jumps and **A** runs. The pause menu uses the menu mapping. From v1.0.12, **ZR** is the default
+shake button. Existing controller profiles take precedence over these defaults.
 
 Install is **human-only** (ES via DBI or Goldleaf); an agent cannot install an NSP remotely. Installs
 take several minutes for the 73 MB package.
@@ -342,7 +345,12 @@ directory that does not survive a reboot.
   subset over libnx, Horizon POSIX shims, Abseil shim, log channel, stub backends.
 - `switch/patches/` — the external changes for Aurora, Dawn, and Abseil. Apply
   `aurora-switch-window.patch`, `aurora-switch-vertex-textures.patch`, and
-  `aurora-switch-direct-efb-resolve.patch` in the Aurora tree. Apply the Dawn patches in the Dawn tree.
+  `aurora-switch-direct-efb-resolve.patch` in the Aurora tree. Apply
+  `aurora-switch-controller-defaults.patch` there for the Switch controller defaults.
+  For the deko3d GX worker, apply `aurora-switch-gx-worker.patch` in Aurora and
+  `runtime-switch-gx-worker.patch` from the runtime checkout root.
+  Apply `aurora-switch-overlap-encode.patch` in Aurora after the deko3d profiling patch.
+  Apply the Dawn patches in the Dawn tree.
   For the frame profiler, apply `aurora-switch-frame-profile.patch` and
   `aurora-switch-efb-encode-timing.patch` in Aurora, and `runtime-switch-frame-profile.patch` from
   the runtime checkout root. Apply `dawn-switch-gl-timing.patch` after the GLES fence fallback.
@@ -532,6 +540,63 @@ seconds with 4,740 hits out of 4,740 cache lookups.
 The final 30 seconds of the playable stage averaged 26.1 FPS. The frame profiler measures
 the game thread and the elapsed time of its finalization call. The deko3d render and present
 workers run asynchronously, so their CPU work and GPU completion require separate timings.
+
+### v1.0.9 handheld timing
+
+v1.0.9 uses the existing deko3d shader databases. Keep `frame-profile.flag` on the SD card and
+test at 1× with stock handheld clocks. Run the same world-map section and the same playable
+course for at least 30 seconds each, then close the software before pulling
+`boot-deko3d.log` and `frame-deko3d.log`.
+
+- `frame p95` is the upper edge of a quarter-millisecond bucket for each two-second sample window.
+  The last bucket covers frames of at least 128 ms.
+- `handheld profile` reports elapsed time in producer waits for the frame worker, worker encoding,
+  staging maps, and synchronous EFB-to-RAM mapping and encoding. Those timings can overlap.
+- `deko3d profile` reports elapsed CPU fence waits per frame and the average GPU marker interval
+  per sampled command list. It samples roughly one in eight lists and reads the reports after
+  the existing completion fence. The GPU value describes one list.
+
+For the build, apply `aurora-switch-deko3d-profile.patch` in Aurora after the other Switch patches,
+`runtime-switch-frame-percentiles.patch` from the runtime checkout root, and
+`dawn-deko3d-submit-profile.patch` in the deko3d Dawn tree. Build the Dawn archive and recompile the
+patched Aurora and runtime units plus `switch/log_channel.cpp`. Set the NACP display version to
+`1.0.9` and keep the pipeline seed in RomFS when packaging.
+
+### v1.0.13 GX worker test
+
+The test installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.13-switch-gx-worker.nsp`.
+
+On deko3d, the GX worker checks the process's allowed Horizon cores because devkitA64's
+`std::thread::hardware_concurrency()` reports zero. The runtime snapshots mutable matrix data
+using the same worker state as Aurora. Recompile Aurora's `lib/gx/fifo.cpp` and the runtime's
+`gx_dl.cpp`, `gx_fifo.cpp`, and `gx_vertex.cpp` in `runtime/src/hle/gx/`.
+
+Compare the same course and world-map route for at least 30 seconds each at stock handheld clocks.
+The boot log should report `GX thread started (Switch)`. Compare the game thread's scheduled CPU
+time, frame p95, and sustained FPS against v1.0.11 with the same resolution and warm shader cache.
+
+### v1.0.14 overlapping render encoding test
+
+The test installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.14-switch-overlap-encode.nsp`.
+
+With v1.0.13, comparable world-map samples with roughly 11,000–12,000 GX draws per frame
+rose from a median 19.1 to 22.9 FPS. The median game-thread CPU time fell from 37.8 to
+26.7 ms per frame, and render-worker waits remained near 15 ms. The final 30 seconds of
+course play averaged 23.7 FPS in v1.0.13. That section had substantially more GX draws
+than the final 30 seconds of the earlier course capture.
+
+v1.0.14 retains the GX worker and allows next-frame GX processing to overlap encoding
+of the previous frame. Recompile Aurora's `lib/aurora.cpp` and `switch/sdl_switch.cpp`.
+The SDL shim returns the Switch's single display to ImGui's deferred frame setup. Check for
+`Switch render encoding: overlapping` in the boot log and compare the same map and course
+sections against v1.0.13 at the same resolution and stock handheld clocks.
+
+On the Switch Lite at 1× and stock handheld clocks, the median two-second sample improved
+from 22.9 to 36.4 FPS on the world map (10,500–12,600 GX draws per frame) and from 23.5 to
+35.4 FPS in heavy course sections (6,900–8,200 draws). Median frame-worker wait fell from
+14.94 to 0.06 ms on the map and from 14.46 to 0.08 ms in those course sections. The game
+thread still used 26–27 ms per frame in both heavy workloads, and one map frame took
+2.74 seconds. These results confirm the improvement and leave a gap to sustained 60 FPS.
 
 ---
 

@@ -1,0 +1,122 @@
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -35,6 +35,10 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
++
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+ #include <cmath>
+ #include <condition_variable>
+ #include <cstdio>
+@@ -381,6 +385,9 @@
+ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::microseconds timeout) noexcept;
+
+ void wait_for_frame_worker_private(FrameWorkerPhase phase) noexcept {
++#if defined(NSMBW_USE_DEKO3D)
++  const SwitchFrameTimer timing(SwitchFramePhase::WorkerWait, !frame_worker_phase_reached(phase));
++#endif
+   constexpr auto kWaitServiceInterval = std::chrono::milliseconds(1);
+   while (!wait_for_frame_worker_private_for(phase, kWaitServiceInterval)) {
+   }
+@@ -1894,6 +1901,9 @@
+ #endif
+     overlapEncode = ctx.interpolationActive || !serialEncode;
+     if (!overlapEncode) {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::WorkerEncode);
++#endif
+       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+     }
+     encoded = WorkerClock::now();
+@@ -1950,7 +1960,12 @@
+   if (overlapEncode) {
+     // Mutex-free: the producer drains and records the next frame in parallel, taking the renderer
+     // mutex per drain, and this phase never takes it.
+-    presentationJobs = encode_sealed_frame(sealedFrame, ctx);
++    {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::WorkerEncode);
++#endif
++      presentationJobs = encode_sealed_frame(sealedFrame, ctx);
++    }
+     publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
+     if (imguiNewFrameOwed) {
+       // Safe only now: every slot has replayed this frame's ImGui draw lists.
+--- a/lib/gfx/common.cpp
++++ b/lib/gfx/common.cpp
+@@ -1143,6 +1143,9 @@
+   ZoneScoped;
+   {
+     ZoneScopedN("Wait for buffer map");
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::StagingMap, s_mappingState.state() != BufferMapState::Mapped);
++#endif
+     map_staging_buffer();
+     while (true) {
+       const auto mappingState = s_mappingState.state();
+--- a/lib/gfx/efb_ram_copy.cpp
++++ b/lib/gfx/efb_ram_copy.cpp
+@@ -4,6 +4,10 @@
+ #include "tex_copy_conv.hpp"
+ #include "../internal.hpp"
+ #include "../webgpu/gpu.hpp"
++
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+
+ #include <algorithm>
+ #include <array>
+@@ -353,20 +357,25 @@
+       std::string message;
+     };
+     const auto result = std::make_shared<MapResult>();
+-    const auto future =
+-        download.buffer.MapAsync(wgpu::MapMode::Read, 0, download.bufferSize, wgpu::CallbackMode::WaitAnyOnly,
+-                                 [result](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+-                                   std::lock_guard lock{result->mutex};
+-                                   result->status = status;
+-                                   if (message.data != nullptr) {
+-                                     size_t length = 0;
+-                                     while (length < 512 && length < message.length && message.data[length] != '\0') {
+-                                       ++length;
+-                                     }
+-                                     result->message.assign(message.data, length);
+-                                   }
+-                                 });
+-    const auto waitStatus = g_instance.WaitAny(future, 5000000000);
++    const auto waitStatus = [&] {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::EfbReadbackWait);
++#endif
++      const auto future =
++          download.buffer.MapAsync(wgpu::MapMode::Read, 0, download.bufferSize, wgpu::CallbackMode::WaitAnyOnly,
++                                    [result](wgpu::MapAsyncStatus status, wgpu::StringView message) {
++                                      std::lock_guard lock{result->mutex};
++                                      result->status = status;
++                                      if (message.data != nullptr) {
++                                        size_t length = 0;
++                                        while (length < 512 && length < message.length && message.data[length] != '\0') {
++                                          ++length;
++                                        }
++                                        result->message.assign(message.data, length);
++                                      }
++                                    });
++      return g_instance.WaitAny(future, 5000000000);
++    }();
+     wgpu::MapAsyncStatus mapStatus;
+     std::string mapMessage;
+     {
+@@ -381,6 +390,9 @@
+       continue;
+     }
+
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::EfbReadbackEncode);
++#endif
+     const auto* pixels = static_cast<const uint8_t*>(download.buffer.GetConstMappedRange(0, download.bufferSize));
+     const auto& readbackTexture = download.copy.nativeTexture ? download.copy.nativeTexture : download.copy.texture;
+     const auto order = texture_pixel_order(readbackTexture);

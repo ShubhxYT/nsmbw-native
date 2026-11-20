@@ -1,0 +1,53 @@
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -1001,6 +1001,27 @@
+     double rendererAndPaceCpuMs = 0;
+     double prepareMs = 0;
+     int cpuFrames = 0;
++#endif
++#if defined(NSMBW_USE_DEKO3D)
++    // Quarter-millisecond buckets plus a final bucket for frames of 128 ms or longer.
++    std::array<uint32_t, 513> frameDurationCounts{};
++
++    void CountDuration(double ms) {
++        const auto bucket = static_cast<size_t>(std::min(ms * 4, 512.0));
++        ++frameDurationCounts[bucket];
++    }
++
++    size_t Percentile95Bucket() const {
++        const auto rank = static_cast<uint32_t>(frames - frames / 20);
++        uint32_t cumulative = 0;
++        for (size_t i = 0; i < frameDurationCounts.size(); ++i) {
++            cumulative += frameDurationCounts[i];
++            if (cumulative >= rank) {
++                return i;
++            }
++        }
++        return frameDurationCounts.size() - 1;
++    }
+ #endif
+ };
+
+@@ -1272,6 +1293,9 @@
+             times.paceMs += ms(now - paceStart);
+             times.worstMs = std::max(times.worstMs, frame);
+             times.sumSq += frame * frame;
++#if defined(NSMBW_USE_DEKO3D)
++            times.CountDuration(frame);
++#endif
+             times.slow += frame > slowFrameMs ? 1 : 0;
+             ++times.frames;
+         } else {
+@@ -1306,6 +1330,12 @@
+                     times.cpuFrames ? times.rendererAndPaceCpuMs / times.cpuFrames : 0.0,
+                     times.cpuFrames, times.frames);
+             switch_log_render_profile(times.frames);
++#if defined(NSMBW_USE_DEKO3D)
++            const size_t bucket = times.Percentile95Bucket();
++            const bool overflow = bucket == times.frameDurationCounts.size() - 1;
++            RT_FRAME_LOGF(RT_TAG_VI, "frame p95 %s%.2f ms (%d frames)\n",
++                          overflow ? ">=" : "<", (bucket + (overflow ? 0 : 1)) * 0.25, times.frames);
++#endif
+ #endif
+             const uint32_t waits = g_idleWaits.exchange(0, std::memory_order_relaxed);
+             const uint32_t retraceEnds = g_idleRetraceEnds.exchange(0, std::memory_order_relaxed);

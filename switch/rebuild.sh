@@ -50,6 +50,7 @@ fi
 INCLUDES="-isystem $DEVKITPRO/libnx/include -isystem $DEVKITPRO/portlibs/switch/include
   -I/src/runtime/include -I/src/runtime/src -I/src
   -isystem /src/runtime/third_party -isystem /src/runtime/third_party/toml11
+  -isystem /src/runtime/third_party/pugixml
   -isystem /src/aurora-main/include -isystem /src/aurora-main/lib
   -isystem /deps/SDL/include -isystem /deps/imgui -isystem /deps/fmt/include
   -isystem /deps/xxhash -isystem /deps/tracy/public -isystem /deps/absl

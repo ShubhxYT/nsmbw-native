@@ -6,6 +6,9 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "settings_overlay.h"
+#if defined(__SWITCH__)
+#include "switch/menu_controls.h"
+#endif
 
 #include <aurora/imgui.h>
 #include <dolphin/gx/GXAurora.h>
@@ -393,8 +396,13 @@ Glyph PadGlyph(uint32_t native) {
         return g;
     }
     switch (native) {
+#if defined(__SWITCH__)
+    case SDL_GAMEPAD_BUTTON_SOUTH: round("B", 0xC8302A); break;
+    case SDL_GAMEPAD_BUTTON_EAST: round("A", 0x3C9C2A); break;
+#else
     case SDL_GAMEPAD_BUTTON_SOUTH: round("A", 0x3C9C2A); break;  // Xbox's green A, red B, blue X, yellow Y
     case SDL_GAMEPAD_BUTTON_EAST: round("B", 0xC8302A); break;
+#endif
     case SDL_GAMEPAD_BUTTON_WEST: round("X", 0x2A64C8); break;
     case SDL_GAMEPAD_BUTTON_NORTH: round("Y", 0xC89600); break;
     case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: cap("LB"); break;
@@ -510,7 +518,7 @@ std::vector<Glyph> PadGlyphs(int action) {
     return glyphs;
 }
 
-std::vector<CellContent> Contents(PromptStyle::Style style) {
+std::vector<CellContent> Contents(PromptStyle::Style style, bool menuButtons) {
     std::vector<CellContent> cells = {{kCodeTwo, {}}, {kCodeOne, {}}, {kCodeA, {}}, {kCodePlus, {}}, {kCodeMinus, {}},
                                       {kCodeDPad, {}}};
     const int actions[5] = {Keybinds::kJump, Keybinds::kRun, Keybinds::kA, Keybinds::kPlus, Keybinds::kMinus};
@@ -532,6 +540,7 @@ std::vector<CellContent> Contents(PromptStyle::Style style) {
         }
     } else if (style == PromptStyle::Style::Controller) {
         for (int i = 0; i < 5; ++i) cells[i].glyphs = PadGlyphs(actions[i]);
+        if (menuButtons) std::swap(cells[0].glyphs, cells[1].glyphs);
         // The D-pad stays the game's own cross: a controller's D-pad (and stick) moves as it shows.
     }
     return cells;
@@ -816,6 +825,12 @@ void Update() {
     static uint32_t s_generation = 0xFFFFFFFFu;
     const PromptStyle::Style style = PromptStyle::Current();
     const int scale = WantedScale();
+#if defined(__SWITCH__)
+    const bool menuButtons = style == PromptStyle::Style::Controller && SwitchUsesMenuButtons();
+#else
+    constexpr bool menuButtons = false;
+#endif
+    static bool s_menuButtons = false;
     // Any binding written (Settings' Keybinds or Controller tab, F10 > Controls, Reset Defaults, a
     // combination taken or cleared, a controller connecting with Config.toml's buttons) bumps
     // Keybinds::BindingsGeneration: the prompts follow at once. The look every 30 frames stays as a
@@ -823,14 +838,15 @@ void Update() {
     static uint32_t s_bindings = 0xFFFFFFFFu;
     const uint32_t bindings = Keybinds::BindingsGeneration();
     const bool changed = static_cast<uint32_t>(style) != s_style || PromptStyle::Generation() != s_generation ||
-                         scale != g_state.scale || bindings != s_bindings;
+                         scale != g_state.scale || bindings != s_bindings || menuButtons != s_menuButtons;
     if (!changed && ++g_state.checkFrame % 30 != 0) {
         return;
     }
     s_style = static_cast<uint32_t>(style);
     s_generation = PromptStyle::Generation();
     s_bindings = bindings;
-    const std::vector<CellContent> cells = Contents(style);
+    s_menuButtons = menuButtons;
+    const std::vector<CellContent> cells = Contents(style, menuButtons);
     const bool any = std::any_of(cells.begin(), cells.end(), [](const CellContent& c) { return !c.glyphs.empty(); });
     const std::string signature = any ? Signature(cells) : std::string();
     if (signature == g_state.signature && scale == g_state.scale) {

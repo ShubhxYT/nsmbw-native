@@ -7,6 +7,7 @@
 // The redirection is dup2 onto descriptors 1 and 2, so ordinary printf/fprintf in the runtime and
 // the translated game code reach the terminal without any changes on their side.
 
+#include "data_root.h"
 #include "frame_log.h"
 #include "frame_profile.h"
 
@@ -28,6 +29,7 @@
 #include <mutex>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include <fcntl.h>
 
@@ -72,11 +74,11 @@ int connect_log_channel() {
 }
 
 #if defined(NSMBW_USE_DEKO3D)
-constexpr const char* kBootLogPath = "sdmc:/switch/nsmbw/boot-deko3d.log";
-constexpr const char* kFrameLogPath = "sdmc:/switch/nsmbw/frame-deko3d.log";
+constexpr const char* kBootLogPath = NSMBW_SWITCH_DATA_ROOT "/boot-deko3d.log";
+constexpr const char* kFrameLogPath = NSMBW_SWITCH_DATA_ROOT "/frame-deko3d.log";
 #else
-constexpr const char* kBootLogPath = "sdmc:/switch/nsmbw/boot.log";
-constexpr const char* kFrameLogPath = "sdmc:/switch/nsmbw/frame.log";
+constexpr const char* kBootLogPath = NSMBW_SWITCH_DATA_ROOT "/boot.log";
+constexpr const char* kFrameLogPath = NSMBW_SWITCH_DATA_ROOT "/frame.log";
 #endif
 
 // Keep a log on the SD card when the development machine is not listening.
@@ -211,6 +213,14 @@ struct RenderTiming {
 RenderTiming g_glReplay;
 RenderTiming g_glFinish;
 RenderTiming g_efbEncode;
+#if defined(NSMBW_USE_DEKO3D)
+std::array<std::atomic<uint64_t>, static_cast<size_t>(SwitchFramePhase::Count)> g_framePhases{};
+RenderTiming g_dkFenceWait;
+// Sum and count are captured together because the GPU worker and VI report race.
+std::mutex g_gpuSamplesMutex;
+uint64_t g_gpuSampleNanos = 0;
+uint64_t g_gpuSamples = 0;
+#endif
 
 } // namespace
 
@@ -280,7 +290,7 @@ extern "C" void switch_frame_logf(const char* format, ...) {
 
 extern "C" bool switch_frame_profiling_enabled() {
     static const bool enabled = [] {
-        const int fd = ::open("sdmc:/switch/nsmbw/frame-profile.flag", O_RDONLY);
+        const int fd = ::open(NSMBW_SWITCH_DATA_ROOT "/frame-profile.flag", O_RDONLY);
         if (fd < 0) {
             return false;
         }
@@ -295,10 +305,43 @@ extern "C" void switch_record_gl_replay(uint64_t nanos) { g_glReplay.Add(nanos);
 extern "C" void switch_record_gl_finish(uint64_t nanos) { g_glFinish.Add(nanos); }
 extern "C" void switch_record_efb_encode(uint64_t nanos) { g_efbEncode.Add(nanos); }
 
+#if defined(NSMBW_USE_DEKO3D)
+extern "C" void switch_record_frame_phase(SwitchFramePhase phase, uint64_t nanos) {
+    g_framePhases[static_cast<size_t>(phase)].fetch_add(nanos, std::memory_order_relaxed);
+}
+
+extern "C" void switch_record_dk_gpu_list(uint64_t nanos) {
+    std::lock_guard lock(g_gpuSamplesMutex);
+    g_gpuSampleNanos += nanos;
+    ++g_gpuSamples;
+}
+
+extern "C" void switch_record_dk_fence_wait(uint64_t nanos) { g_dkFenceWait.Add(nanos); }
+#endif
+
 extern "C" void switch_log_render_profile(int frames) {
 #if defined(NSMBW_USE_DEKO3D)
     switch_frame_logf("[vi] render profile: deko3d, EFB copy encoding %.2f ms (%.1f copies) per frame\n",
                       g_efbEncode.TakeMillisecondsPerFrame(frames), g_efbEncode.TakeCallsPerFrame(frames));
+    const auto takePhase = [frames](SwitchFramePhase phase) {
+        return g_framePhases[static_cast<size_t>(phase)].exchange(0, std::memory_order_relaxed) / (1e6 * frames);
+    };
+    switch_frame_logf("[vi] handheld profile: worker wait %.2f, worker encode %.2f, staging map %.2f, "
+                      "EFB readback wait %.2f, EFB RAM encode %.2f ms/frame\n",
+                      takePhase(SwitchFramePhase::WorkerWait), takePhase(SwitchFramePhase::WorkerEncode),
+                      takePhase(SwitchFramePhase::StagingMap), takePhase(SwitchFramePhase::EfbReadbackWait),
+                      takePhase(SwitchFramePhase::EfbReadbackEncode));
+    uint64_t sampleNanos;
+    uint64_t samples;
+    {
+        std::lock_guard lock(g_gpuSamplesMutex);
+        sampleNanos = std::exchange(g_gpuSampleNanos, 0);
+        samples = std::exchange(g_gpuSamples, 0);
+    }
+    switch_frame_logf("[vi] deko3d profile: fence wait %.2f ms/frame (%.1f waits), "
+                      "GPU %.3f ms/sample (%llu completed lists)\n",
+                      g_dkFenceWait.TakeMillisecondsPerFrame(frames), g_dkFenceWait.TakeCallsPerFrame(frames),
+                      samples ? sampleNanos / (1e6 * samples) : 0.0, static_cast<unsigned long long>(samples));
 #else
     switch_frame_logf("[vi] render profile: GL command replay %.2f ms (%.1f batches), glFinish %.2f ms "
                       "(%.1f waits), EFB copy encoding %.2f ms (%.1f copies) per frame\n",
@@ -323,7 +366,7 @@ extern "C" void switch_trace_mark(const char* tag) {
         std::strcmp(tag, "CFG loaded") == 0) {
         return;
     }
-    const int fd = ::open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    const int fd = ::open(NSMBW_SWITCH_DATA_ROOT "/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
         return;
     }

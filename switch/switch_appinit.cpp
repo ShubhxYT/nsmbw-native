@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "data_root.h"
 #include "switch_tls.h"
 
 // Definitions for the bootstrap's reporting state (declared in switch_tls.h).
@@ -34,7 +35,7 @@ void logWindowInit(const char* step, Result result) {
     if (size <= 0 || static_cast<size_t>(size) >= sizeof(line)) {
         return;
     }
-    const int fd = open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    const int fd = open(NSMBW_SWITCH_DATA_ROOT "/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
         (void)!write(fd, line, static_cast<size_t>(size));
         close(fd);
@@ -135,7 +136,7 @@ extern "C" void __appInit(void) {
             int n = std::snprintf(line, sizeof line, "BSS@appInit: %08x %08x %08x %08x",
                                   words[0], words[16], words[48], words[256]);
             if (n > 0) {
-                int fd = open("sdmc:/switch/nsmbw/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+                int fd = open(NSMBW_SWITCH_DATA_ROOT "/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
                 if (fd >= 0) {
                     (void)!write(fd, line, static_cast<size_t>(n));
                     (void)!write(fd, "\n", 1);

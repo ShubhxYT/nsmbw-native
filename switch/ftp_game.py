@@ -2,7 +2,7 @@
 """Mirror the extracted game onto the console's SD card over DBI's FTP server.
 
 DBI (installed as an .nsp on the console) serves the SD card on port 5000 when its FTP mode is
-started. The runtime reads the disc image from sdmc:/switch/nsmbw/game, so this copies the local
+started. The runtime reads the disc image from sdmc:/switch/aaa-nsmbw/game, so this copies the local
 extraction there once and skips files that already match in size.
 
     python3 ftp_game.py <switch ip> [local game dir] [remote dir]
@@ -13,7 +13,7 @@ import sys
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.111"
 LOCAL = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/wii-port/disc")
-REMOTE = sys.argv[3] if len(sys.argv) > 3 else "sdmc:/switch/nsmbw/game"
+REMOTE = sys.argv[3] if len(sys.argv) > 3 else "sdmc:/switch/aaa-nsmbw/game"
 
 
 def ensure_dir(ftp: ftplib.FTP, path: str) -> None:

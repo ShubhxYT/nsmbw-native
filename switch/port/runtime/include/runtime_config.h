@@ -21,6 +21,9 @@
 #include <toml.hpp>
 #include "platform/host_platform.h"
 #include "runtime_product.h"
+#if defined(__SWITCH__)
+#include "switch/data_root.h"
+#endif
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -408,7 +411,7 @@ inline std::filesystem::path BaseApplicationDataDirectory() {
 #if defined(__SWITCH__)
     // Horizon mounts the SD card at sdmc:. Everything the port owns lives under one directory, so
     // Config.toml, UserData and the extracted game sit beside the .nro.
-    return std::filesystem::path("sdmc:/switch/nsmbw");
+    return std::filesystem::path(NSMBW_SWITCH_DATA_ROOT);
 #elif defined(_WIN32)
     static const std::optional<std::filesystem::path> documents = []() -> std::optional<std::filesystem::path> {
         PWSTR documentsPath = nullptr;

@@ -1,0 +1,34 @@
+--- a/runtime/src/hle/gx/gx_stream_common.h
++++ b/runtime/src/hle/gx/gx_stream_common.h
+@@ -13,6 +13,10 @@
+ // instead of forked per-file copies; genuine per-caller differences are explicit parameters here.
+ // Header-inline throughout: the shipped clang/llvm-mingw build has no LTO across runtime shards,
+ // so a non-inline hot helper becomes a real call on the per-vertex path.
++
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" bool AuroraGxFifoThreaded();
++#endif
+ 
+ namespace GxCmd {
+ 
+@@ -313,15 +317,19 @@
+     return true;
+ }
+ 
+-// NSMBW_GX_THREAD=1: the GX thread decodes a list after the game has moved on, and the matrix
++// The GX thread decodes a list after the game has moved on, and the matrix
+ // arrays an indexed load reads are rewritten as it goes (model after model), so aurora is handed a
+ // copy taken now, which is what decoding at call time used to read. The copies live in a ring that
+ // waits for the GX thread before it wraps.
+ inline const uint8_t* SnapshotForGxThread(const uint8_t* data, uint32_t size) {
++#if defined(NSMBW_USE_DEKO3D)
++    const bool threaded = AuroraGxFifoThreaded();
++#else
+     static const bool threaded = [] {
+         const char* value = std::getenv("NSMBW_GX_THREAD");
+         return value != nullptr && value[0] == '1';
+     }();
++#endif
+     if (!threaded || data == nullptr || size == 0) {
+         return data;
+     }

@@ -1,0 +1,48 @@
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -25,6 +25,8 @@
+ #include <windows.h>
+ #elif defined(__linux__)
+ #include <pthread.h>
++#elif defined(NSMBW_USE_DEKO3D)
++#include <switch.h>
+ #endif
+ 
+ namespace aurora::gx::fifo {
+@@ -163,7 +165,11 @@
+       }
+     });
+     state->thread.detach();
++#if defined(NSMBW_USE_DEKO3D)
++    Log.info("GX thread started (Switch)");
++#else
+     Log.info("GX thread started ({} hardware threads)", std::thread::hardware_concurrency());
++#endif
+     return state;
+   }();
+   return *t;
+@@ -203,7 +209,14 @@
+     if (value != nullptr && value[0] != '\0') {
+       return value[0] == '1';
+     }
++#if defined(NSMBW_USE_DEKO3D)
++    // devkitA64's std::thread::hardware_concurrency() reports zero on Horizon.
++    u64 cores = 0;
++    return R_SUCCEEDED(svcGetInfo(&cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) &&
++           (cores & (cores - 1)) != 0;
++#else
+     return std::thread::hardware_concurrency() >= 2;
++#endif
+   }();
+   // Never on OpenGL (ES): its context belongs to one thread, so that renderer runs single-threaded.
+   // Off until the renderer is up, too; turning on later is safe, as nothing is left queued then.
+@@ -307,3 +320,9 @@
+ }
+ 
+ } // namespace aurora::gx::fifo
++
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" bool AuroraGxFifoThreaded() {
++  return aurora::gx::fifo::threaded();
++}
++#endif

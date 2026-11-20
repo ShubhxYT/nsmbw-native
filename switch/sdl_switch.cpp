@@ -8,6 +8,8 @@
 //
 // Signatures are taken from the real SDL3 headers, so this file is checked against them.
 
+#include "data_root.h"
+
 #include <SDL3/SDL.h>
 
 #include <sys/stat.h>
@@ -40,6 +42,7 @@ namespace {
 
 constexpr uint32_t kWindowWidth = 1280;
 constexpr uint32_t kWindowHeight = 720;
+constexpr SDL_DisplayID kDisplayId = 1;
 
 std::atomic<bool> g_initialized{false};
 std::string g_error;
@@ -82,8 +85,8 @@ struct ButtonMap {
 };
 
 constexpr ButtonMap kButtonMap[] = {
-    {HidNpadButton_A, SDL_GAMEPAD_BUTTON_SOUTH},
-    {HidNpadButton_B, SDL_GAMEPAD_BUTTON_EAST},
+    {HidNpadButton_A, SDL_GAMEPAD_BUTTON_EAST},
+    {HidNpadButton_B, SDL_GAMEPAD_BUTTON_SOUTH},
     {HidNpadButton_X, SDL_GAMEPAD_BUTTON_NORTH},
     {HidNpadButton_Y, SDL_GAMEPAD_BUTTON_WEST},
     {HidNpadButton_StickL, SDL_GAMEPAD_BUTTON_LEFT_STICK},
@@ -449,7 +452,7 @@ struct SDL_Window {
   int height = static_cast<int>(kWindowHeight);
   std::atomic<SDL_WindowFlags> flags{0};
   SDL_PropertiesID properties = 0;
-  SDL_DisplayID display = 1;
+  SDL_DisplayID display = kDisplayId;
   NWindow* native = nullptr;
 };
 
@@ -525,7 +528,7 @@ float SDL_GetWindowDisplayScale(SDL_Window* window) {
   return 1.0f;
 }
 
-SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* window) { return window ? window->display : 1; }
+SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* window) { return window ? window->display : kDisplayId; }
 
 bool SDL_SetWindowTitle(SDL_Window* window, const char* title) {
   if (window && title) {
@@ -1259,8 +1262,8 @@ SDL_PixelFormat SDL_GetPixelFormatForMasks(int bpp, uint32_t rmask, uint32_t gma
 // ---------------------------------------------------------------------------------------------
 
 namespace {
-constexpr const char* kBasePath = "sdmc:/switch/nsmbw/";
-constexpr const char* kPrefPath = "sdmc:/switch/nsmbw/data/";
+constexpr const char* kBasePath = NSMBW_SWITCH_DATA_ROOT "/";
+constexpr const char* kPrefPath = NSMBW_SWITCH_DATA_ROOT "/data/";
 } // namespace
 
 extern "C" {
@@ -1726,8 +1729,15 @@ char* SDL_GetClipboardText(void) {
 }
 
 SDL_DisplayID* SDL_GetDisplays(int* count) {
-    (void)count;
-    return nullptr;
+    auto* displays = static_cast<SDL_DisplayID*>(SDL_malloc(2 * sizeof(SDL_DisplayID)));
+    if (count) {
+        *count = displays ? 1 : 0;
+    }
+    if (displays) {
+        displays[0] = kDisplayId;
+        displays[1] = 0;
+    }
+    return displays;
 }
 
 bool SDL_GetDisplayBounds(SDL_DisplayID display, SDL_Rect* rect) {

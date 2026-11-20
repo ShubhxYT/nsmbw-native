@@ -11,6 +11,9 @@
 #include "runtime_log.h"
 #include "settings_overlay.h"
 #include "wii_remote_input.h"
+#if defined(__SWITCH__)
+#include "switch/menu_controls.h"
+#endif
 
 #include <dolphin/pad.h>
 #include <aurora/sdl_gamepad.h>
@@ -393,8 +396,14 @@ Intent PadIntent(uint32_t chan, const PADStatus& pad, SDL_Gamepad* gamepad) {
         if (std::abs(sx) >= kDiagonalSlope * std::abs(sy)) intent.buttons |= sx < 0 ? kScreenLeft : kScreenRight;
         if (std::abs(sy) >= kDiagonalSlope * std::abs(sx)) intent.buttons |= sy < 0 ? kScreenDown : kScreenUp;
     }
-    if (b & PAD_BUTTON_A) intent.buttons |= kWpadTwo;
-    if (b & (PAD_BUTTON_B | PAD_BUTTON_X)) intent.buttons |= kWpadOne;
+#if defined(__SWITCH__)
+    const bool menuButtons = (b & (PAD_BUTTON_A | PAD_BUTTON_B)) && SwitchUsesMenuButtons();
+#else
+    constexpr bool menuButtons = false;
+#endif
+    if (b & PAD_BUTTON_A) intent.buttons |= menuButtons ? kWpadOne : kWpadTwo;
+    if (b & PAD_BUTTON_B) intent.buttons |= menuButtons ? kWpadTwo : kWpadOne;
+    if (b & PAD_BUTTON_X) intent.buttons |= kWpadOne;
     if (b & PAD_BUTTON_Y) intent.buttons |= kWpadA;
     if (b & PAD_BUTTON_START) intent.buttons |= kWpadPlus;
     const RemoteBinding& tiltLeft = g_remoteBindings[kRemoteTiltLeft];

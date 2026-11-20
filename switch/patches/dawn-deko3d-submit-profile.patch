@@ -1,0 +1,122 @@
+--- a/src/dawn/native/deko3d/DeviceDeko3d.cpp
++++ b/src/dawn/native/deko3d/DeviceDeko3d.cpp
+@@ -30,6 +30,7 @@
+ #include <switch.h>
+
+ #include <algorithm>
++#include <chrono>
+ #include <cstdio>
+ #include <cstring>
+ #include <utility>
+@@ -54,6 +55,10 @@
+ #include "src/dawn/native/deko3d/ShaderModuleDeko3d.h"
+ #include "src/dawn/native/deko3d/SwapChainDeko3d.h"
+ #include "src/dawn/native/deko3d/TextureDeko3d.h"
++
++extern "C" bool switch_frame_profiling_enabled();
++extern "C" void switch_record_dk_gpu_list(uint64_t nanos);
++extern "C" void switch_record_dk_fence_wait(uint64_t nanos);
+
+ namespace dawn::native::deko3d {
+
+@@ -206,6 +211,9 @@
+             return;
+         }
+         dkCmdBufDestroy(entry->cmdBuf);
++        if (entry->profileTimestamps != nullptr) {
++            dkMemBlockDestroy(entry->profileTimestamps);
++        }
+         for (DkMemBlock block : entry->memory) {
+             dkMemBlockDestroy(block);
+         }
+@@ -296,6 +304,23 @@
+         dkCmdBufBindSamplerDescriptorSet(cmdBuf, dkMemBlockGetGpuAddr(mSamplerDescriptorMemory),
+                                          kMaxSamplerDescriptors);
+         if (kDeko3dTrace) TraceFlush("after descriptor set bind");
++        // Vary the spacing around one in eight lists so periodic presentation and game
++        // lists both get sampled. Counter reports can flush graphics work.
++        if (switch_frame_profiling_enabled() && ((++mProfileListCount * 0x9e3779b9u) >> 29) == 0) {
++            auto& timestamps = mCmdBuf->profileTimestamps;
++            if (timestamps == nullptr) {
++                DkMemBlockMaker maker;
++                dkMemBlockMakerDefaults(&maker, mDkDevice, DK_MEMBLOCK_ALIGNMENT);
++                maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
++                timestamps = dkMemBlockCreate(&maker);
++            }
++            if (timestamps != nullptr) {
++                std::memset(dkMemBlockGetCpuAddr(timestamps), 0, 32);
++                dkCmdBufReportCounter(cmdBuf, DkCounter_TimestampPipelineTop,
++                                      dkMemBlockGetGpuAddr(timestamps));
++                mCmdBuf->sampled = true;
++            }
++        }
+     }
+     return cmdBuf;
+ }
+@@ -313,6 +338,10 @@
+     auto inFlight = std::make_unique<InFlight>();
+     inFlight->serial = serial;
+     if (mHasPendingCommands) {
++        if (mCmdBuf->sampled) {
++            dkCmdBufReportCounter(mCmdBuf->cmdBuf, DkCounter_Timestamp,
++                                  dkMemBlockGetGpuAddr(mCmdBuf->profileTimestamps) + 16);
++        }
+         DkCmdList list = dkCmdBufFinishList(mCmdBuf->cmdBuf);
+         dkQueueSubmitCommands(mDkQueue, list);
+         // The list lives in this command buffer's memory until the fence signals; record the next
+@@ -348,6 +377,14 @@
+         std::unique_ptr<InFlight> done = std::move(mInFlight.front());
+         mInFlight.pop_front();
+         if (done->cmdBuf != nullptr) {
++            if (done->cmdBuf->sampled) {
++                const auto* reports =
++                    static_cast<const uint64_t*>(dkMemBlockGetCpuAddr(done->cmdBuf->profileTimestamps));
++                if (reports[1] != 0 && reports[3] > reports[1]) {
++                    switch_record_dk_gpu_list(dkTimestampToNs(reports[3] - reports[1]));
++                }
++                done->cmdBuf->sampled = false;
++            }
+             dkCmdBufClear(done->cmdBuf->cmdBuf);
+             // Clear rewinds to the most recently added chunk; earlier chunks are no longer used.
+             auto& memory = done->cmdBuf->memory;
+@@ -389,6 +426,10 @@
+ }
+
+ ExecutionSerial Device::WaitForSerial(ExecutionSerial serial, Nanoseconds timeout) {
++    using Clock = std::chrono::steady_clock;
++    const bool profile = switch_frame_profiling_enabled() &&
++                         !mInFlight.empty() && mInFlight.front()->serial <= serial;
++    const auto start = profile ? Clock::now() : Clock::time_point{};
+     for (const auto& inFlight : mInFlight) {
+         if (inFlight->serial > serial) {
+             break;
+@@ -397,6 +438,10 @@
+         if (dkFenceWait(&inFlight->fence, ns) != DkResult_Success) {
+             break;
+         }
++    }
++    if (profile) {
++        switch_record_dk_fence_wait(
++            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+     }
+     return PollCompletedSerial();
+ }
+--- a/src/dawn/native/deko3d/DeviceDeko3d.h
++++ b/src/dawn/native/deko3d/DeviceDeko3d.h
+@@ -191,6 +191,7 @@
+     DkDevice mDkDevice = nullptr;
+     DkQueue mDkQueue = nullptr;
+     bool mHasPendingCommands = false;
++    uint32_t mProfileListCount = 0;
+
+     // A DkCmdBuf with the memory it has been given. dkCmdBufClear rewinds into the last chunk, so a
+     // command buffer may only be cleared and reused once the GPU has finished its submitted lists.
+@@ -198,6 +199,8 @@
+         DkDevice device = nullptr;
+         DkCmdBuf cmdBuf = nullptr;
+         std::vector<DkMemBlock> memory;
++        DkMemBlock profileTimestamps = nullptr;
++        bool sampled = false;
+     };
+     MaybeError AcquireCommandBuffer();
+     std::unique_ptr<CmdBufEntry> mCmdBuf;

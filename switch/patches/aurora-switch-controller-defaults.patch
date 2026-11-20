@@ -1,0 +1,15 @@
+--- a/lib/dolphin/pad/pad.cpp
++++ b/lib/dolphin/pad/pad.cpp
+@@ -140,8 +140,12 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
+     {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
+     {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
+     {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
++#if defined(__SWITCH__)
++    {PADEncodeAxisButton(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, false), PAD_TRIGGER_Z},
++#else
+     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
++#endif
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+     {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_BUTTON_UP},
