@@ -4,10 +4,10 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status.** v1.0.20 runs at 1× on the stock-clock Switch Lite with working controls.
-Its latest course capture averaged 52.1 FPS in the final 30 seconds and 46.2 FPS overall.
-Busy scenes exceed the 16.7 ms frame budget. See the
-[v1.0.20 hardware measurements](#v1020-staging-rollback-and-presentation-timing).
+**Current release.** [v1.1](#v11-switch-lite-release) carries forward the 1× renderer and Switch
+controls. The preceding [v1.0.23 hardware test](#v1023-earlier-gx-worker-handoff) averaged
+54.5 and 55.5 FPS across two courses. The second course averaged 57.7 FPS in its final
+30 seconds and held 60 FPS for the final 14 seconds. Busy scenes can exceed the 16.67 ms frame budget.
 
 ---
 
@@ -323,16 +323,14 @@ Removed because they crash or conflict: `sys-ftpd`, `sys-ftpd-freeze`, `sys-ftp-
 disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the newest NSP, and the
 logs (`boot.log`, `init.log`).
 
-The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.20-switch-latency-check.nsp`.
+The v1.1 installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.1-switch.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
 jumps and **A** runs. The pause menu uses the menu mapping. From v1.0.12, **ZR** is the default
 shake button. Existing controller profiles take precedence over these defaults.
 
-Install is **human-only** (ES via DBI or Goldleaf); an agent cannot install an NSP remotely. Installs
-take several minutes for the 73 MB package.
+Install the NSP on the console using DBI or Goldleaf. The v1.1 package is about 58 MB.
 
 ---
 
@@ -896,6 +894,28 @@ The 16 KiB same-build comparison is still pending.
 The slowest full-course window on v1.0.23 averaged 36.6 FPS with 25.71 ms of game-thread
 CPU time, 0.39 ms of FIFO wait and 0.07 ms of renderer preparation wait per frame.
 The game thread still exceeds the 16.67 ms budget in busy scenes.
+
+### v1.1 Switch Lite release
+
+Install `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.1-switch.nsp`. This starts the `1.1.x` series,
+with subsequent patch builds numbered `1.1.1`, `1.1.2` and onward.
+
+Use the v1.0.23 build and supplied HOME icon. Set the NACP display version to `1.1`, apply
+`aurora-switch-gx-recycle-buffers.patch` in Aurora, and rebuild the FIFO object before packaging.
+
+```sh
+bash switch/rebuild.sh --pack aurora-main/lib/gx/fifo.cpp
+```
+
+On deko3d the GX worker takes ownership of the completed command buffer. The producer gets
+a recycled or fresh buffer in the same handoff, removing the byte copy and the second queue
+lock. The worker recycles the allocation after decoding and keeps up to eight spare buffers.
+The 4 KiB handoff threshold, GX command order, 1× render scale, title ID and data directory carry
+over from v1.0.23. The existing `GX batch profile` can measure the change in handoff time.
+
+Ryujinx reached the world map at 1× and confirmed buffer recycling with the 4 KiB threshold.
+The map logged about 67 buffer handoffs per frame through several windows. The Switch Lite
+performance measurements above are from v1.0.23. The v1.1 hardware comparison is pending.
 
 ---
 

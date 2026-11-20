@@ -12,7 +12,7 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
 | **macOS** | ✅ tested — Apple silicon, ~58 fps, Metal |
 | **Windows** | ✅ tested — Windows 11 x64, ~58 fps, D3D12 |
 | **iPad / iPhone** | ✅ tested — iPad Pro M4, iPadOS 26, unsigned IPA via LiveContainer |
-| **Nintendo Switch Lite** | Experimental v1.0.4 NSP reaches gameplay with working controls. Frame times still limit playability. [Hardware measurements](docs/REBUILD.md#switch-lite-performance) |
+| **Nintendo Switch Lite** | v1.1 native build at 1×. The previous hardware test averaged 54.5–55.5 FPS across two courses. [Build guide and results](docs/REBUILD.md#v11-switch-lite-release) |
 | **Game version** | USA, `SMNE01`, revision 1 |
 | **LAN play** | ⚠️ beta (desktop only) |
 | **Known issue** | ⚠️ world-map crash after a course — [details](docs/known-issues.md) |

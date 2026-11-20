@@ -1,0 +1,121 @@
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -12,8 +12,11 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <deque>
++#include <memory>
+ #include <mutex>
++#include <new>
+ #include <thread>
++#include <utility>
+ #include <vector>
+ 
+ #include "tracy/Tracy.hpp"
+@@ -119,13 +122,26 @@
+ namespace {
+ constexpr uint32_t kHandOffBytes = 16 * 1024;  // queue a buffer once this much has built up
+ 
++#if defined(NSMBW_USE_DEKO3D)
++struct FifoBatch {
++  struct Deleter {
++    void operator()(uint8_t* bytes) const noexcept { std::free(bytes); }
++  };
++  std::unique_ptr<uint8_t, Deleter> data;
++  uint32_t size = 0;
++  uint32_t capacity = 0;
++};
++#else
++using FifoBatch = std::vector<uint8_t>;
++#endif
++
+ struct GxThread {
+   std::thread thread;
+   std::mutex mutex;
+   std::condition_variable work;
+   std::condition_variable idle;
+-  std::deque<std::vector<uint8_t>> jobs;
+-  std::vector<std::vector<uint8_t>> spare;
++  std::deque<FifoBatch> jobs;
++  std::vector<FifoBatch> spare;
+   bool busy = false;
+ };
+ 
+@@ -148,7 +164,7 @@
+       pthread_setname_np(pthread_self(), "GXThread");
+ #endif
+       for (;;) {
+-        std::vector<uint8_t> job;
++        FifoBatch job;
+         {
+           std::unique_lock lock(state->mutex);
+           state->work.wait(lock, [state] { return !state->jobs.empty(); });
+@@ -156,12 +172,22 @@
+           state->jobs.pop_front();
+           state->busy = true;
+         }
++#if defined(NSMBW_USE_DEKO3D)
++        process_buffer(job.data.get(), job.size);
++#else
+         process_buffer(job.data(), static_cast<uint32_t>(job.size()));
++#endif
+         {
+           std::lock_guard lock(state->mutex);
+           state->busy = false;
++#if defined(NSMBW_USE_DEKO3D)
++          if (state->spare.size() < 8) {
++            state->spare.push_back(std::move(job));
++          }
++#else
+           job.clear();
+           state->spare.push_back(std::move(job));
++#endif
+           if (state->jobs.empty()) {
+             state->idle.notify_all();
+           }
+@@ -170,7 +196,7 @@
+     });
+     state->thread.detach();
+ #if defined(NSMBW_USE_DEKO3D)
+-    Log.info("GX thread started (Switch)");
++    Log.info("GX thread started (Switch), recycling FIFO buffers");
+ #else
+     Log.info("GX thread started ({} hardware threads)", std::thread::hardware_concurrency());
+ #endif
+@@ -190,7 +216,27 @@
+   }
+ #endif
+   auto& t = gx_thread();
+-  std::vector<uint8_t> job;
++#if defined(NSMBW_USE_DEKO3D)
++  {
++    std::lock_guard lock(t.mutex);
++    FifoBatch replacement;
++    if (!t.spare.empty()) {
++      replacement = std::move(t.spare.back());
++      t.spare.pop_back();
++    } else {
++      replacement.data.reset(static_cast<uint8_t*>(std::malloc(kHandOffBytes)));
++      if (!replacement.data) throw std::bad_alloc{};
++      replacement.capacity = kHandOffBytes;
++    }
++    // Transfer the complete command buffer. The worker owns it until decoding
++    // finishes, and the producer resumes writing into the spare allocation.
++    auto& job = t.jobs.emplace_back();
++    job.data.reset(std::exchange(detail::sBufferData, replacement.data.release()));
++    job.size = std::exchange(detail::sBufferSize, 0);
++    job.capacity = std::exchange(detail::sBufferCapacity, replacement.capacity);
++  }
++#else
++  FifoBatch job;
+   {
+     std::lock_guard lock(t.mutex);
+     if (!t.spare.empty()) {
+@@ -204,6 +250,7 @@
+     std::lock_guard lock(t.mutex);
+     t.jobs.push_back(std::move(job));
+   }
++#endif
+   t.work.notify_one();
+ }
+ } // namespace
