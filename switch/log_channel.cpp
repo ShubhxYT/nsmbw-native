@@ -317,6 +317,42 @@ extern "C" void switch_record_dk_gpu_list(uint64_t nanos) {
 }
 
 extern "C" void switch_record_dk_fence_wait(uint64_t nanos) { g_dkFenceWait.Add(nanos); }
+
+namespace {
+thread_local uint64_t g_gpuSampleTag = 0;
+
+struct GpuFrameSample {
+    uint64_t frame = 0;
+    uint64_t renderBegin = 0;
+    uint64_t renderEnd = 0;
+};
+std::array<GpuFrameSample, 32> g_gpuFrames{};
+uint64_t g_gpuFrameSamples = 0;
+uint64_t g_gpuFrameWorkNanos = 0;
+uint64_t g_gpuFrameSpanNanos = 0;
+}
+
+extern "C" uint64_t switch_set_gpu_sample_tag(uint64_t tag) {
+    return std::exchange(g_gpuSampleTag, tag);
+}
+extern "C" uint64_t switch_gpu_sample_tag() { return g_gpuSampleTag; }
+
+extern "C" void switch_record_gpu_frame_part(uint64_t tag, uint64_t begin, uint64_t end) {
+    const uint64_t frame = tag >> 1;
+    std::lock_guard lock(g_gpuSamplesMutex);
+    auto& sample = g_gpuFrames[((frame - 1) / 16) % g_gpuFrames.size()];
+    if ((tag & 1) == 0) {
+        if (sample.frame != frame) sample = {frame, begin, end};
+        else sample.renderEnd = end;
+        return;
+    }
+    if (sample.frame == frame && sample.renderEnd <= begin) {
+        ++g_gpuFrameSamples;
+        g_gpuFrameWorkNanos += sample.renderEnd - sample.renderBegin + end - begin;
+        g_gpuFrameSpanNanos += end - sample.renderBegin;
+        sample = {};
+    }
+}
 #endif
 
 extern "C" void switch_log_render_profile(int frames) {
@@ -333,12 +369,27 @@ extern "C" void switch_log_render_profile(int frames) {
                       takePhase(SwitchFramePhase::EfbReadbackEncode));
     switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
                       takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
+    const double sampledGxBegin = takePhase(SwitchFramePhase::GxBeginSample);
+    switch_frame_logf("[vi] GX producer profile: GXBegin estimated %.2f ms/frame (1 in 64 calls timed)\n",
+                      sampledGxBegin * 64.0);
     uint64_t sampleNanos;
     uint64_t samples;
+    uint64_t frameSamples;
+    uint64_t frameWork;
+    uint64_t frameSpan;
     {
         std::lock_guard lock(g_gpuSamplesMutex);
         sampleNanos = std::exchange(g_gpuSampleNanos, 0);
         samples = std::exchange(g_gpuSamples, 0);
+        frameSamples = std::exchange(g_gpuFrameSamples, 0);
+        frameWork = std::exchange(g_gpuFrameWorkNanos, 0);
+        frameSpan = std::exchange(g_gpuFrameSpanNanos, 0);
+    }
+    if (frameSamples != 0) {
+        switch_frame_logf("[vi] deko3d frame GPU: render + composition %.2f ms, elapsed %.2f ms "
+                          "(%llu paired samples)\n",
+                          frameWork / (1e6 * frameSamples), frameSpan / (1e6 * frameSamples),
+                          static_cast<unsigned long long>(frameSamples));
     }
     switch_frame_logf("[vi] deko3d profile: fence wait %.2f ms/frame (%.1f waits), "
                       "GPU %.3f ms/sample (%llu completed lists)\n",

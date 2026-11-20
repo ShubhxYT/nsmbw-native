@@ -4,11 +4,11 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status.** v1.0.16 runs at 1× on the stock-clock Switch Lite with working controls.
-Its latest capture averaged 48.5 FPS over the final 30.2 seconds of a course. Heavy map windows
-ran at a median 40.2 FPS. The game thread still exceeds the 16.7 ms budget for 60 FPS.
+**Current status.** v1.0.17 runs at 1× on the stock-clock Switch Lite with working controls.
+Its latest capture averaged 44.1 FPS over the recorded 26.2 seconds of a course, at a median
+19.22 ms of game-thread CPU per frame. The previous run covered a different stretch of the course.
 The port creates Wii save data on hardware, and a save reload has been verified in Ryujinx.
-See the [v1.0.16 hardware measurements](#v1016-vertex-state-reuse-test).
+See the [v1.0.17 hardware measurements](#v1017-checked-memory-and-disc-cache-test).
 
 ---
 
@@ -325,7 +325,7 @@ disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the 
 logs (`boot.log`, `init.log`).
 
 The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.16-switch-vertex-state.nsp`.
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.17-switch-checked-ram.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -671,7 +671,44 @@ size lookup. A native failure falls back to the existing read path. The first su
 logs `Switch DVD file cache active`. Compare the same course and map at 1× and stock clocks,
 checking median scheduled CPU, FPS, frame-time percentiles and disc time on hitch frames.
 Ryujinx at 1× reached the world map and World 1-1, and the boot log confirmed the DVD cache
-was active. Switch Lite results for this installer are pending.
+was active. The Lite's v1.0.17 run confirmed the descriptor cache was active. The recorded
+26.2 seconds of the manual course averaged 44.1 FPS with a median 19.22 ms of scheduled
+game-thread CPU per frame. The previous course capture covered a different stretch. The final
+4 seconds on the map averaged 42.0 FPS and included a 345.3 ms frame. The startup capture
+still recorded 368 ms across 72 reads in one frame. The profile's slow-frame limit means the
+largest frame in a window does not always have a disc timing breakdown.
+
+### v1.0.18 checked memory ranges, disc cache and profiling
+
+Installer: `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.18-switch-memory-and-io.nsp`.
+Apply `runtime-switch-memory-and-io.patch` from the runtime checkout root,
+`aurora-switch-gpu-frame-profile.patch` from Aurora, and `dawn-deko3d-frame-profile.patch`
+from Dawn after `dawn-deko3d-submit-profile.patch`. Copy the updated Switch platform files
+and rebuild Dawn's device object before linking the NSP. For the deko3d container layout:
+
+```sh
+DAWN_BUILD_DIR=/deko/dawn-build \
+  DAWN_AR=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar \
+  python3 switch/rebuild-dawn-object.py DeviceDeko3d.cpp
+bash switch/rebuild.sh --translated --pack switch/log_channel.cpp \
+  runtime/src/hle/storage/dvd.cpp runtime/src/hle/gx/gx_vertex.cpp aurora-main/lib/aurora.cpp
+```
+
+Translated access groups can reuse a RAM pointer when the existing memory tables prove the whole
+group fits in a single mapped 1 MiB page and satisfies its read and write policy. Cross-page ranges,
+deferred reads and executable writes retain the checked fallback.
+
+The DVD layer retains successful whole-file reads of at most 128 KiB within an 8 MiB budget.
+This reuses data already requested by the game. With profiling enabled, `frame-deko3d.log`
+records filenames for up to 96 reads of at least 8 ms to identify further prefetch candidates.
+
+The same profile estimates GXBegin time from sampled calls and pairs render and composition
+GPU timestamps by logical frame once every 16 frames. The combined render and composition
+duration covers the two measured command batches. The elapsed span also includes the gap
+between them. Earlier copy-only work, queue work outside those batches and GPU utilization
+are outside this measurement. The profile reads timestamps after the existing fence completes.
+Ryujinx at 1× reached World 1-2 and returned to the map. Its logs confirmed RAM cache hits,
+GX producer timings, and paired GPU samples. Lite measurements are pending.
 
 ---
 

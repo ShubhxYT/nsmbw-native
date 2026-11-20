@@ -10,9 +10,10 @@ import shlex
 import subprocess
 import sys
 
-DAWN = "/deps/dawn-src"
-BUILD = os.path.join(DAWN, "build-switch")
+DAWN = os.getenv("DAWN_SOURCE", "/deps/dawn-src")
+BUILD = os.getenv("DAWN_BUILD_DIR", os.path.join(DAWN, "build-switch"))
 LIB = os.path.join(BUILD, "src/dawn/native/libwebgpu_dawn.a")
+AR = os.getenv("DAWN_AR", "ar")
 
 
 def main() -> None:
@@ -36,12 +37,12 @@ def main() -> None:
         print(result.stderr[-2000:])
         raise SystemExit("compile failed")
 
-    ar = subprocess.run(["ar", "r", LIB, obj], capture_output=True, text=True)
+    ar = subprocess.run([AR, "r", LIB, obj], capture_output=True, text=True)
     if ar.returncode != 0:
         print(ar.stdout[-800:])
         print(ar.stderr[-800:])
         raise SystemExit("ar r failed")
-    ranlib = subprocess.run(["ar", "s", LIB], capture_output=True, text=True)
+    ranlib = subprocess.run([AR, "s", LIB], capture_output=True, text=True)
     if ranlib.returncode != 0:
         raise SystemExit("ar s failed")
     print("archive size:", os.path.getsize(LIB))

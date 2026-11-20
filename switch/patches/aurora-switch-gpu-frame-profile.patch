@@ -1,0 +1,22 @@
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -1035,6 +1035,9 @@
+         const auto submitStarted = PresentClock::now();
+         {
+           std::lock_guard submitLock(g_queueSubmitMutex);
++#if defined(NSMBW_USE_DEKO3D)
++          const SwitchGpuFrameSample profile(job.logicalFrame, true, !job.interpolated);
++#endif
+           g_queue.Submit(1, &buffer);
+         }
+         submitDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -1677,6 +1680,9 @@
+   const auto submitEncodedSlot = [&](wgpu::CommandEncoder& target, bool releaseMetalFXOutput = true) {
+     const auto buffer = target.Finish(&cmdBufDescriptor);
+     std::lock_guard submitLock(g_queueSubmitMutex);
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchGpuFrameSample profile(ctx.logicalFrame, false, !ctx.interpolationActive);
++#endif
+     g_queue.Submit(1, &buffer);
+     if (releaseMetalFXOutput && g_metalfxPendingOutput) {
+       if (!g_metalfxPendingOutput->end_output()) metalfx_failed(g_metalfxPendingOutput->error());

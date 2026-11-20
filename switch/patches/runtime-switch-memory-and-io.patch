@@ -1,0 +1,145 @@
+--- a/runtime/include/memory_access.h
++++ b/runtime/include/memory_access.h
+@@ -232,11 +232,20 @@
+     const uint32_t guestStart = base + static_cast<uint32_t>(minOffset);
+     if (length == 0 || length > kPageSize || guestStart > UINT32_MAX - (length - 1)) return nullptr;
+     if (GuestFlat::RequiresCheckedAccess()) {
+-        // A host page can cover multiple independently-special Wii pages.
+-        // Returning null keeps resolved accesses on the checked Memory::*
+-        // path, which materializes deferred reads and applies write policy.
+-        (void)needsWrite;
++#if defined(__SWITCH__)
++        // The translator ends this pointer's lifetime at a guest call, suspend, or
++        // other memory epoch boundary. Give it a host pointer only when one coarse
++        // page proves that the entire range can use the same RAM and access policy.
++        const uint32_t page = guestStart >> kPageShift;
++        if ((guestStart & kPageMask) + length > kPageSize) return nullptr;
++        const uintptr_t bias = needsWrite ? g_fullWritablePageBias[page] :
++                                           g_fullReadablePageBias[page];
++        if (bias == 0 || (needsRead && g_fullReadablePageBias[page] == 0)) return nullptr;
++        return reinterpret_cast<uint8_t*>(bias - 1u + guestStart);
++#else
++        // Larger host pages can cover several independently protected Wii pages.
+         return nullptr;
++#endif
+     }
+     if (needsWrite &&
+         (FlatWriteNeedsPolicy(guestStart) || FlatWriteNeedsPolicy(guestStart + (length - 1))))
+--- a/runtime/src/hle/storage/dvd.cpp
++++ b/runtime/src/hle/storage/dvd.cpp
+@@ -24,6 +24,8 @@
+ #elif defined(__SWITCH__)
+ #include <switch.h>
+ #include <array>
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
+ #elif defined(__ANDROID__)
+ #include <fcntl.h>
+ #include <sys/resource.h>
+@@ -149,7 +151,7 @@
+ };
+ 
+ bool TryReadSwitchDiscFile(const fs::path& path, uint64_t offset, uint32_t length,
+-                           std::vector<uint8_t>& destination) {
++                           std::vector<uint8_t>& destination, bool& wholeFile) {
+     static std::mutex mutex;
+     static std::array<SwitchDiscFile, 16> files;
+     static uint64_t clock = 0;
+@@ -198,11 +200,26 @@
+     }
+     entry->lastUse = ++clock;
+     destination = std::move(staged);
++    wholeFile = offset == 0 && length == entry->size;
+     if (cacheHit && !loggedHit) {
+         RT_LOGF(RT_TAG_DVD, "Switch DVD file cache active\n");
+         loggedHit = true;
+     }
+     return true;
++}
++
++void CacheSmallSwitchDiscFile(const fs::path& path, const std::vector<uint8_t>& bytes) {
++    constexpr size_t kMaxFileBytes = 128 * 1024;
++    constexpr size_t kMaxCacheBytes = 8 * 1024 * 1024;
++    if (bytes.empty() || bytes.size() > kMaxFileBytes) return;
++
++    // Charge metadata as well as data so very small files have a bounded cost.
++    const size_t cost = bytes.size() + path.native().size() + 256;
++    static size_t used = 0;
++    std::lock_guard lock(g_readCacheMutex);
++    if (cost > kMaxCacheBytes - used || g_readCache.contains(path.native())) return;
++    g_readCache.emplace(path.native(), std::make_shared<const std::vector<uint8_t>>(bytes));
++    used += cost;
+ }
+ #elif defined(__ANDROID__)
+ // Files the game has read, kept open (with their sizes), so the next read of one skips the open.
+@@ -276,6 +293,10 @@
+     const auto start = std::chrono::steady_clock::now();
+     bool ok = false;
+     if (const FileBytes bytes = CachedFile(path)) {
++#if defined(__SWITCH__)
++        static std::once_flag cachedReadLogged;
++        std::call_once(cachedReadLogged, [] { RT_LOGF(RT_TAG_DVD, "Switch DVD RAM cache active\n"); });
++#endif
+         failure = DvdReadContract::HostReadFailure::None;
+         if (offset >= bytes->size()) {
+             failure = DvdReadContract::HostReadFailure::BadOffset;
+@@ -289,18 +310,30 @@
+     } else {
+ #if defined(__SWITCH__)
+         failure = DvdReadContract::HostReadFailure::None;
+-        ok = TryReadSwitchDiscFile(path, offset, length, destination) ||
+-             DvdReadContract::ReadExact(path, offset, length, destination, failure);
++        bool wholeFile = false;
++        ok = TryReadSwitchDiscFile(path, offset, length, destination, wholeFile);
++        if (ok && wholeFile) CacheSmallSwitchDiscFile(path, destination);
++        if (!ok) ok = DvdReadContract::ReadExact(path, offset, length, destination, failure);
+ #elif defined(__ANDROID__)
+         ok = ReadWithOpenFile(path, offset, length, destination, failure);
+ #else
+         ok = DvdReadContract::ReadExact(path, offset, length, destination, failure);
+ #endif
+     }
+-    g_dvdReadNanos.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+-                                                       std::chrono::steady_clock::now() - start)
+-                                                       .count()),
+-                             std::memory_order_relaxed);
++    const auto elapsed = std::chrono::steady_clock::now() - start;
++    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
++    g_dvdReadNanos.fetch_add(static_cast<uint64_t>(nanos), std::memory_order_relaxed);
++#if defined(__SWITCH__)
++    if (elapsed >= std::chrono::milliseconds(8) && switch_frame_profiling_enabled()) {
++        static std::atomic<unsigned> slowReads{0};
++        if (slowReads.fetch_add(1, std::memory_order_relaxed) < 96) {
++            const auto name = path.filename().string();
++            switch_frame_logf("[dvd] slow read %.2f ms, %u bytes at %llu, %s\n",
++                              nanos / 1e6, length, static_cast<unsigned long long>(offset),
++                              name.c_str());
++        }
++    }
++#endif
+     g_dvdReads.fetch_add(1, std::memory_order_relaxed);
+     return ok;
+ }
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -5,6 +5,9 @@
+ #include "fiber_manager.h"
+ #include "guest_interrupt_context.h"
+ #include "runtime_log.h"
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+ 
+ #include <dolphin/gx/GXAurora.h>
+ 
+@@ -302,6 +305,10 @@
+ }
+ 
+ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
++#if defined(NSMBW_USE_DEKO3D)
++    static thread_local uint32_t calls = 0;
++    const SwitchFrameTimer sampledBegin(SwitchFramePhase::GxBeginSample, (++calls & 63u) == 0);
++#endif
+     if(IsDisplayListActive()){
+         WriteDisplayListData((u8)(t|vf), 1);
+         WriteDisplayListData((u16)nv, 2);
