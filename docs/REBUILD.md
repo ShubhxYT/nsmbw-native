@@ -4,11 +4,10 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current release.** [v1.1](#v11-switch-lite-release) carries forward the 1× renderer and Switch
-controls. The preceding [v1.0.23 hardware test](#v1023-earlier-gx-worker-handoff) averaged
-54.5 and 55.5 FPS across two courses. The second course averaged 57.7 FPS in its final
-30 seconds and held 60 FPS for the final 14 seconds. A v1.1 handheld playtest reported
-about 30 FPS in a water level. Busy scenes can exceed the 16.67 ms frame budget.
+**Current release.** [v1.1](#v11-switch-lite-release) runs at 1× on Switch Lite. The hardware
+capture averaged 55.9 FPS in the first course and 38.2 FPS in the water level. In the slow
+water-level sections, the game thread alone used a median of 30.07 ms of CPU time per frame
+against a 16.67 ms frame budget for 60 FPS.
 
 ---
 
@@ -917,12 +916,23 @@ over from v1.0.23. The existing `GX batch profile` can measure the change in han
 Ryujinx reached the world map at 1× and confirmed buffer recycling with the 4 KiB threshold.
 The map logged about 67 buffer handoffs per frame through several windows.
 
-In the v1.1 Switch Lite playtest, the player reported a drop to about 30 FPS in a water level,
-or roughly 33 ms per frame. The console's FTP server was unreachable after the run, so the
-water-level frame-time distribution and resource timings are pending. The measured v1.0.23
-dips show that the game thread can exceed the stock-clock frame budget. The water-level
-report establishes the observed slowdown, and identifying the limiting resource there requires
-the v1.1 capture.
+The v1.1 Switch Lite logs confirm 1× rendering, FIFO buffer recycling, and the 4 KiB threshold.
+The figures below use completed two-second log windows in each course.
+
+| Metric | First course | Water level | Water-level windows at 36 FPS or below |
+| --- | ---: | ---: | ---: |
+| Recorded time | 80.4 s | 112.9 s | 52.5 s |
+| Average FPS | 55.9 | 38.2 | 31.7 |
+| Median GX draws per frame | 2,345 | 6,566 | 7,403 |
+| Median scheduled game-thread CPU time per frame | 16.27 ms | 25.43 ms | 30.07 ms |
+| Median GX FIFO synchronization wait per frame | 0.07 ms | 1.23 ms | 1.25 ms |
+| Median renderer preparation wait per frame | 0.08 ms | 0.07 ms | 0.07 ms |
+| Median GX handoff time per frame | 0.10 ms | 0.21 ms | 0.25 ms |
+
+The last 30 seconds averaged 56.6 FPS in the first course and 38.5 FPS in the water level.
+The slowest two-second water-level window averaged 27.5 FPS. The CPU figures indicate a
+game-thread bottleneck in the current port at stock clocks. GPU timestamp profiling was off,
+so the capture cannot quantify how much time the GPU spent rendering.
 
 #### Optional per-game overclock
 
