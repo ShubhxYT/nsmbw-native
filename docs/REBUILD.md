@@ -323,7 +323,8 @@ Removed because they crash or conflict: `sys-ftpd`, `sys-ftpd-freeze`, `sys-ftp-
 disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the newest NSP, and the
 logs (`boot.log`, `init.log`).
 
-The current installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.12-switch.nsp`.
+The current hardware-tested installer is
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.14-switch-overlap-encode.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -597,6 +598,22 @@ from 22.9 to 36.4 FPS on the world map (10,500–12,600 GX draws per frame) and 
 14.94 to 0.06 ms on the map and from 14.46 to 0.08 ms in those course sections. The game
 thread still used 26–27 ms per frame in both heavy workloads, and one map frame took
 2.74 seconds. These results confirm the improvement and leave a gap to sustained 60 FPS.
+
+### v1.0.15 graphics worker affinity test
+
+The test installer is `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.15-switch-core-affinity.nsp`.
+
+With all three application cores available, pin GX decoding to core 1 and frame encoding
+to core 2. The boot log records both affinity results. Apply
+`aurora-switch-worker-affinity.patch` after the GX worker and overlapping encode patches.
+Recompile Aurora's `lib/aurora.cpp`, `lib/gx/fifo.cpp`, `lib/gfx/pipeline_cache.cpp` and
+`switch/log_channel.cpp`. With `frame-profile.flag` enabled, `GX profile` measures FIFO
+synchronization and pipeline waits separately to diagnose spikes.
+
+Compare the same map and course sections at 1× with warm caches and stock handheld clocks.
+The related Switch port queues texture copies on the GX worker. That experiment produced
+visible corruption in this build in Ryujinx, so this test uses the copy ordering from v1.0.14.
+See [the related port's texture copy change](https://github.com/schuler-ph/nsmbw-switch/commit/4e3a98be14f2).
 
 ---
 

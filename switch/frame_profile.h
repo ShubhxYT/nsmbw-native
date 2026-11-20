@@ -17,6 +17,8 @@ enum class SwitchFramePhase {
     StagingMap,
     EfbReadbackWait,
     EfbReadbackEncode,
+    GxSyncWait,
+    PipelineWait,
     Count,
 };
 

@@ -1,0 +1,75 @@
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -26,7 +26,8 @@
+ #elif defined(__linux__)
+ #include <pthread.h>
+ #elif defined(NSMBW_USE_DEKO3D)
+-#include <switch.h>
++#include "switch/frame_profile.h"
++#include "switch/worker_affinity.h"
+ #endif
+ 
+ namespace aurora::gx::fifo {
+@@ -132,6 +133,9 @@
+   static GxThread* t = [] {
+     auto* state = new GxThread();
+     state->thread = std::thread([state] {
++#if defined(NSMBW_USE_DEKO3D)
++      Log.info("Switch GX worker affinity: {}", SwitchPinGraphicsWorker(1) ? "CPU 1" : "system default");
++#endif
+       // Named for profilers (NSMBW_PROFILE_THREAD=GXThread). SetThreadDescription is looked up,
+       // as Windows 10 1607 brought it.
+ #if defined(_WIN32)
+@@ -296,6 +300,9 @@
+   }
+   hand_off();
+   std::unique_lock lock(t.mutex);
++#if defined(NSMBW_USE_DEKO3D)
++  const SwitchFrameTimer timing(SwitchFramePhase::GxSyncWait, !t.jobs.empty() || t.busy);
++#endif
+   t.idle.wait(lock, [&t] { return t.jobs.empty() && !t.busy; });
+ }
+ 
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -38,6 +38,7 @@
+ 
+ #if defined(NSMBW_USE_DEKO3D)
+ #include "switch/frame_profile.h"
++#include "switch/worker_affinity.h"
+ #endif
+ #include <cmath>
+ #include <condition_variable>
+@@ -315,6 +316,9 @@
+ #endif
+ 
+ void frame_worker_main() noexcept {
++#if defined(NSMBW_USE_DEKO3D)
++  Log.info("Switch frame worker affinity: {}", SwitchPinGraphicsWorker(2) ? "CPU 2" : "system default");
++#endif
+   {
+     std::lock_guard lock(g_frameWorker.mutex);
+     g_frameWorker.threadId = std::this_thread::get_id();
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -9,6 +9,10 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+ #include <condition_variable>
+ #include <cstdlib>
+ #include <cstring>
+@@ -1332,6 +1336,9 @@
+       // A persistent resolve is the last chance to produce its texture, so timing out here corrupts it
+       // permanently. Only a pass marked requireReadyPipelines takes this path.
+     }
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::PipelineWait);
++#endif
+     g_pipelineCv.wait(lock, finished);
+   }
+   const auto it = g_pipelines.find(ref);

@@ -331,6 +331,8 @@ extern "C" void switch_log_render_profile(int frames) {
                       takePhase(SwitchFramePhase::WorkerWait), takePhase(SwitchFramePhase::WorkerEncode),
                       takePhase(SwitchFramePhase::StagingMap), takePhase(SwitchFramePhase::EfbReadbackWait),
                       takePhase(SwitchFramePhase::EfbReadbackEncode));
+    switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
+                      takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
     uint64_t sampleNanos;
     uint64_t samples;
     {
