@@ -1,0 +1,41 @@
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -183,6 +183,12 @@
+   if (detail::sBufferSize == 0) {
+     return;
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  const SwitchFrameTimer timing(SwitchFramePhase::GxHandoff);
++  if (switch_frame_profiling_enabled()) {
++    switch_record_gx_handoff();
++  }
++#endif
+   auto& t = gx_thread();
+   std::vector<uint8_t> job;
+   {
+@@ -265,7 +271,14 @@
+     drain();
+     return;
+   }
+-  if (detail::sBufferSize >= kHandOffBytes) {
++#if defined(NSMBW_USE_DEKO3D)
++  // Horizon has a dedicated GX core. Hand off earlier so it can decode the batch
++  // while the game still produces commands, ahead of the next state read or EFB copy.
++  static const uint32_t batchBytes = switch_gx_batch_bytes();
++#else
++  constexpr uint32_t batchBytes = kHandOffBytes;
++#endif
++  if (detail::sBufferSize >= batchBytes) {
+     hand_off();
+   }
+ }
+@@ -292,6 +305,9 @@
+     if (t.jobs.empty() && !t.busy) {
+       lock.unlock();  // only this thread queues jobs, so the GX thread stays idle meanwhile
+       if (detail::sBufferSize != 0) {
++#if defined(NSMBW_USE_DEKO3D)
++        const SwitchFrameTimer timing(SwitchFramePhase::GxInlineDecode);
++#endif
+         process_buffer(detail::sBufferData, detail::sBufferSize);
+         detail::sBufferSize = 0;
+       }

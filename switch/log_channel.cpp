@@ -216,6 +216,7 @@ RenderTiming g_efbEncode;
 #if defined(NSMBW_USE_DEKO3D)
 std::atomic<uint32_t> g_skippedEfbSnapshots{0};
 std::atomic<uint32_t> g_retainedEfbSnapshots{0};
+std::atomic<uint32_t> g_gxHandoffs{0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(SwitchFramePhase::Count)> g_framePhases{};
 RenderTiming g_dkFenceWait;
 std::mutex g_presentTimingMutex;
@@ -332,6 +333,21 @@ extern "C" void switch_record_efb_snapshots(uint32_t skipped, uint32_t retained)
     g_retainedEfbSnapshots.fetch_add(retained, std::memory_order_relaxed);
 }
 
+extern "C" uint32_t switch_gx_batch_bytes() {
+    static const uint32_t bytes = [] {
+        const int fd = ::open(NSMBW_SWITCH_DATA_ROOT "/gx-fifo-16k.flag", O_RDONLY);
+        if (fd >= 0) close(fd);
+        const uint32_t batchBytes = (fd >= 0 ? 16u : 4u) * 1024u;
+        std::fprintf(stderr, "nsmbw: GX batch handoff threshold %u KiB\n", batchBytes / 1024u);
+        return batchBytes;
+    }();
+    return bytes;
+}
+
+extern "C" void switch_record_gx_handoff() {
+    g_gxHandoffs.fetch_add(1, std::memory_order_relaxed);
+}
+
 extern "C" bool switch_gpu_frame_profiling_enabled() {
     static const bool enabled = [] {
         if (!switch_frame_profiling_enabled()) return false;
@@ -445,6 +461,11 @@ extern "C" void switch_log_render_profile(int frames) {
     }
     switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
                       takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
+    const auto handoffs = g_gxHandoffs.exchange(0, std::memory_order_relaxed);
+    const double handoffMs = takePhase(SwitchFramePhase::GxHandoff);
+    const double inlineDecodeMs = takePhase(SwitchFramePhase::GxInlineDecode);
+    switch_frame_logf("[vi] GX batch profile: handoff %.2f ms (%.1f batches), inline decode %.2f ms/frame\n",
+                      handoffMs, handoffs / static_cast<double>(frames), inlineDecodeMs);
     const uint64_t reusedIndices = g_reusedIndexState.exchange(0, std::memory_order_relaxed);
     const uint64_t reusedTextures = g_reusedTextureInputs.exchange(0, std::memory_order_relaxed);
     if (reusedIndices != 0 || reusedTextures != 0) {

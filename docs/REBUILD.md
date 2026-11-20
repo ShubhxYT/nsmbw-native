@@ -851,6 +851,31 @@ preparation. That points to reducing active CPU work to reach the 16.67 ms budge
 consistently. This comparison uses separate play runs. A test with the v1.0.22 fallback
 flag would isolate the effect of the snapshot change.
 
+### v1.0.23 earlier GX worker handoff
+
+Install `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.23-switch-gx-handoff.nsp`.
+Use the v1.0.22 build and HOME icon, set the NACP version to 1.0.23, apply
+`aurora-switch-gx-early-handoff.patch` in Aurora and copy the updated Switch files.
+
+```sh
+bash switch/rebuild.sh --pack aurora-main/lib/gx/fifo.cpp switch/log_channel.cpp
+```
+
+The game thread hands buffered GX commands to the worker at 4 KiB so decoding can start
+earlier. The decoder still consumes batches in FIFO order, and the game thread still
+waits at the existing synchronization points. The threshold is checked at the same safe
+command boundaries. Direct framebuffer resolves and the 1× render scale carry over from v1.0.22.
+
+The `GX batch profile` in `frame-deko3d.log` reports batch count, time spent handing off
+batches, and elapsed time in inline decoding on the game thread. Compare these with
+game-thread active time, FIFO synchronization wait and frame times. For a controlled
+comparison in the same build, create an empty `sdmc:/switch/aaa-nsmbw/gx-fifo-16k.flag`
+and relaunch to restore the 16 KiB threshold. The boot log confirms the active threshold.
+
+Ryujinx displayed World 1-1 at 1× with the 4 KiB threshold. The new counters recorded
+26–36 worker batches per frame and 0.43–0.45 ms of inline decoding in sample course
+windows. Switch Lite performance and the 16 KiB comparison are pending.
+
 ---
 
 ## 9. Pitfalls that cost the most time
