@@ -7,7 +7,8 @@ build environment, and the remaining work.
 **Current release.** [v1.1](#v11-switch-lite-release) carries forward the 1× renderer and Switch
 controls. The preceding [v1.0.23 hardware test](#v1023-earlier-gx-worker-handoff) averaged
 54.5 and 55.5 FPS across two courses. The second course averaged 57.7 FPS in its final
-30 seconds and held 60 FPS for the final 14 seconds. Busy scenes can exceed the 16.67 ms frame budget.
+30 seconds and held 60 FPS for the final 14 seconds. A v1.1 handheld playtest reported
+about 30 FPS in a water level. Busy scenes can exceed the 16.67 ms frame budget.
 
 ---
 
@@ -914,8 +915,26 @@ The 4 KiB handoff threshold, GX command order, 1× render scale, title ID and da
 over from v1.0.23. The existing `GX batch profile` can measure the change in handoff time.
 
 Ryujinx reached the world map at 1× and confirmed buffer recycling with the 4 KiB threshold.
-The map logged about 67 buffer handoffs per frame through several windows. The Switch Lite
-performance measurements above are from v1.0.23. The v1.1 hardware comparison is pending.
+The map logged about 67 buffer handoffs per frame through several windows.
+
+In the v1.1 Switch Lite playtest, the player reported a drop to about 30 FPS in a water level,
+or roughly 33 ms per frame. The console's FTP server was unreachable after the run, so the
+water-level frame-time distribution and resource timings are pending. The measured v1.0.23
+dips show that the game thread can exceed the stock-clock frame budget. The water-level
+report establishes the observed slowdown, and identifying the limiting resource there requires
+the v1.1 capture.
+
+#### Optional per-game overclock
+
+For smoother handheld gameplay on a modded Switch Lite, consider a modest CPU clock increase
+using a per-title handheld profile for `01004E53A1B50000`. Start with one supported CPU step,
+keep the other clocks at stock, and replay the same section at 1× to compare frame times.
+Leave the tool's power limits enabled. The port uses the console's current clocks and runs at
+stock settings by default. [sys-clk documentation](https://github.com/retronx-team/sys-clk#config)
+
+Higher clocks can increase heat and battery drain. Keep the vents clear and revert the profile
+if the console overheats or becomes unstable. A sustained 60 FPS throughout the water level has
+yet to be measured with an overclock. [Nintendo ventilation guidance](https://www.nintendo.com/sg/support/qa/detail/33804)
 
 ---
 

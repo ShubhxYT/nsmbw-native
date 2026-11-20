@@ -12,7 +12,7 @@ This is a build kit, not a game. It contains no game code, no assets, no keys an
 | **macOS** | ✅ tested — Apple silicon, ~58 fps, Metal |
 | **Windows** | ✅ tested — Windows 11 x64, ~58 fps, D3D12 |
 | **iPad / iPhone** | ✅ tested — iPad Pro M4, iPadOS 26, unsigned IPA via LiveContainer |
-| **Nintendo Switch Lite** | v1.1 native build at 1×. The previous hardware test averaged 54.5–55.5 FPS across two courses. [Build guide and results](docs/REBUILD.md#v11-switch-lite-release) |
+| **Nintendo Switch Lite** | v1.1 native build at 1×. The previous hardware test averaged 54.5–55.5 FPS across two courses. A water level dropped to about 30 FPS in a v1.1 handheld playtest. [Build guide and results](docs/REBUILD.md#v11-switch-lite-release) |
 | **Game version** | USA, `SMNE01`, revision 1 |
 | **LAN play** | ⚠️ beta (desktop only) |
 | **Known issue** | ⚠️ world-map crash after a course — [details](docs/known-issues.md) |
