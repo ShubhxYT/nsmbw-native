@@ -4,10 +4,10 @@
 nothing, without the working tree. It records the goal, what has been verified, platform fixes, the
 build environment, and the remaining work.
 
-**Current status.** v1.0.18 runs at 1× on the stock-clock Switch Lite with working controls.
-Its latest course capture averaged 47.2 FPS in the last 30 seconds and 43.9 FPS overall.
-It reached 58.9 FPS in two-second windows. The worst sustained stretch showed waiting for
-the render worker as a major cost. See the [v1.0.18 hardware measurements](#v1018-checked-memory-ranges-disc-cache-and-profiling).
+**Current status.** v1.0.20 runs at 1× on the stock-clock Switch Lite with working controls.
+Its latest course capture averaged 52.1 FPS in the final 30 seconds and 46.2 FPS overall.
+Busy scenes exceed the 16.7 ms frame budget. See the
+[v1.0.20 hardware measurements](#v1020-staging-rollback-and-presentation-timing).
 
 ---
 
@@ -324,7 +324,7 @@ disc, a `NAND/` directory pre-seeded with the WC24 payload, `dsp_coef.bin`, the 
 logs (`boot.log`, `init.log`).
 
 The current hardware-tested installer is
-`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.18-switch-memory-and-io.nsp`.
+`sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.20-switch-latency-check.nsp`.
 The title is `aaa-nsmbw` on HOME. The upgrade keeps the same title ID and moves the existing
 NAND and shader cache with the SD directory. Earlier packages expect `sdmc:/switch/nsmbw/`.
 On Switch, **A** confirms and **B** goes back in menus and on the world map. In courses, **B**
@@ -772,7 +772,40 @@ presentation and the peak time spent acquiring a display buffer for jobs that re
 acquire. Compare a continuous course with the same controller and display settings,
 including time spent playing before leaving the game. These timings describe the display
 pipeline and cannot directly measure button-to-screen delay. Ryujinx confirmed the new timings
-through the world map. The Lite latency comparison is pending.
+through the world map.
+
+The Lite recorded 161.1 seconds of course play at 46.2 FPS overall, including 52.1 FPS in
+the final 30.2 seconds. In the 29 two-second course windows below 45 FPS, median game-thread
+CPU time per frame was 22.66 ms and the median sampled render-plus-composition duration was
+17.36 ms. These windows had a median 5,936 GX draws and 30 framebuffer copies per frame.
+Peak presentation queue and image acquisition waits for the course were 1.27 and 1.87 ms.
+The 2.48-second acquisition stall from v1.0.19 did not recur in this capture.
+
+### v1.0.21 draw state reuse
+
+Installer: `sdmc:/switch/aaa-nsmbw/aaa-nsmbw-v1.0.21-switch-draw-state.nsp`.
+Use the v1.0.20 build, including the supplied HOME icon, and set NACP version to 1.0.21.
+Apply `dawn-deko3d-reuse-draw-state.patch` and copy the updated Switch platform files:
+
+```sh
+DAWN_BUILD_DIR=/deko/dawn-build \
+  DAWN_AR=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar \
+  python3 switch/rebuild-dawn-object.py CommandBufferDeko3d.cpp
+bash switch/rebuild.sh --pack aurora-main/lib/aurora.cpp switch/log_channel.cpp
+```
+
+deko3d now compares index addresses, index formats and primitive-restart state across
+consecutive indexed draws in a render pass. It also skips dirtying texture units whose
+descriptor inputs are identical within a pipeline. Draw order, framebuffer copies and
+render settings are preserved. The runtime reports saved index and restart commands and
+unchanged texture inputs in the frame log.
+
+`frame-profile.flag` still enables FPS, CPU, renderer and presentation timing. Create
+`gpu-frame-profile.flag` alongside it before launch to enable tiled-cache-flushing GPU
+timestamps. Use the same course and map at stock clocks and 1× to check both responsiveness
+and the frequency of long frames. Ryujinx reached the map and a course with GPU timestamps
+off. One map window avoided a mean 549 index and restart commands per frame.
+Switch Lite measurements are pending.
 
 ---
 

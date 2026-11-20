@@ -28,6 +28,7 @@ extern "C" void switch_record_frame_phase(SwitchFramePhase phase, uint64_t nanos
 extern "C" void switch_record_dk_gpu_list(uint64_t nanos);
 extern "C" void switch_record_dk_fence_wait(uint64_t nanos);
 extern "C" void switch_record_present_latency(uint64_t queuedNanos, uint64_t acquireNanos);
+extern "C" bool switch_gpu_frame_profiling_enabled();
 extern "C" uint64_t switch_set_gpu_sample_tag(uint64_t tag);
 extern "C" uint64_t switch_gpu_sample_tag();
 extern "C" void switch_record_gpu_frame_part(uint64_t tag, uint64_t begin, uint64_t end);
@@ -35,7 +36,7 @@ extern "C" void switch_record_gpu_frame_part(uint64_t tag, uint64_t begin, uint6
 class SwitchGpuFrameSample {
 public:
     SwitchGpuFrameSample(uint32_t frame, bool composition, bool native)
-        : active_(native && frame % 16 == 0 && switch_frame_profiling_enabled()),
+        : active_(native && frame % 16 == 0 && switch_gpu_frame_profiling_enabled()),
           previous_(active_ ? switch_set_gpu_sample_tag(
                                    ((static_cast<uint64_t>(frame) + 1) << 1) | composition)
                              : 0) {}

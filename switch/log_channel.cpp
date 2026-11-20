@@ -223,6 +223,8 @@ struct PresentTiming {
     uint32_t samples = 0;
 };
 PresentTiming g_presentTiming;
+std::atomic<uint64_t> g_reusedIndexState{0};
+std::atomic<uint64_t> g_reusedTextureInputs{0};
 // Sum and count are captured together because the GPU worker and VI report race.
 std::mutex g_gpuSamplesMutex;
 uint64_t g_gpuSampleNanos = 0;
@@ -313,6 +315,23 @@ extern "C" void switch_record_gl_finish(uint64_t nanos) { g_glFinish.Add(nanos);
 extern "C" void switch_record_efb_encode(uint64_t nanos) { g_efbEncode.Add(nanos); }
 
 #if defined(NSMBW_USE_DEKO3D)
+extern "C" bool switch_gpu_frame_profiling_enabled() {
+    static const bool enabled = [] {
+        if (!switch_frame_profiling_enabled()) return false;
+        const int fd = ::open(NSMBW_SWITCH_DATA_ROOT "/gpu-frame-profile.flag", O_RDONLY);
+        if (fd < 0) return false;
+        close(fd);
+        std::fprintf(stderr, "nsmbw: GPU timestamp profiling enabled\n");
+        return true;
+    }();
+    return enabled;
+}
+
+extern "C" void switch_record_deko_state_reuse(uint32_t indexAndRestart, uint32_t textureInputs) {
+    g_reusedIndexState.fetch_add(indexAndRestart, std::memory_order_relaxed);
+    g_reusedTextureInputs.fetch_add(textureInputs, std::memory_order_relaxed);
+}
+
 extern "C" void switch_record_frame_phase(SwitchFramePhase phase, uint64_t nanos) {
     g_framePhases[static_cast<size_t>(phase)].fetch_add(nanos, std::memory_order_relaxed);
 }
@@ -403,6 +422,14 @@ extern "C" void switch_log_render_profile(int frames) {
     }
     switch_frame_logf("[vi] GX profile: FIFO sync wait %.2f, pipeline wait %.2f ms/frame\n",
                       takePhase(SwitchFramePhase::GxSyncWait), takePhase(SwitchFramePhase::PipelineWait));
+    const uint64_t reusedIndices = g_reusedIndexState.exchange(0, std::memory_order_relaxed);
+    const uint64_t reusedTextures = g_reusedTextureInputs.exchange(0, std::memory_order_relaxed);
+    if (reusedIndices != 0 || reusedTextures != 0) {
+        switch_frame_logf("[vi] deko3d state reuse: %.1f index/restart commands avoided, "
+                          "%.1f unchanged texture inputs per frame\n",
+                          reusedIndices / static_cast<double>(frames),
+                          reusedTextures / static_cast<double>(frames));
+    }
     const double sampledGxBegin = takePhase(SwitchFramePhase::GxBeginSample);
     switch_frame_logf("[vi] GX producer profile: GXBegin estimated %.2f ms/frame (1 in 64 calls timed)\n",
                       sampledGxBegin * 64.0);

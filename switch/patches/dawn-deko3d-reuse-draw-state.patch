@@ -1,0 +1,155 @@
+--- a/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
++++ b/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
+@@ -29,6 +29,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <bitset>
+ #include <cstdio>
+ #include <cstring>
+ #include <vector>
+@@ -50,6 +51,9 @@
+ #include "src/dawn/native/deko3d/SamplerDeko3d.h"
+ #include "src/dawn/native/deko3d/TextureDeko3d.h"
+ 
++extern "C" bool switch_frame_profiling_enabled();
++extern "C" void switch_record_deko_state_reuse(uint32_t indexAndRestart, uint32_t textureInputs);
++
+ namespace dawn::native::deko3d {
+ 
+ namespace {
+@@ -106,6 +110,8 @@
+         ResetUnits();
+     }
+ 
++    uint32_t ReusedTextureInputs() const { return mReusedTextureInputs; }
++
+     MaybeError Apply() {
+         BeforeApply();
+         for (BindGroupIndex index : mDirtyBindGroupsObjectChangedOrIsDynamic) {
+@@ -127,6 +133,8 @@
+   private:
+     void ResetUnits() {
+         mPlaceholderSamplerPending = true;
++        mImageKnown.reset();
++        mSamplerKnown.reset();
+         mDirtyUnitsBegin = kMaxTextureUnits;
+         mDirtyUnitsEnd = 0;
+     }
+@@ -137,17 +145,25 @@
+     }
+ 
+     void SetUnitImage(uint32_t unit, uint32_t imageId) {
+-        if (unit < kMaxTextureUnits) {
+-            mUnitImage[unit] = imageId;
+-            MarkUnitDirty(unit);
+-        }
++        if (unit >= kMaxTextureUnits) return;
++        if (mImageKnown[unit] && mUnitImage[unit] == imageId) {
++            ++mReusedTextureInputs;
++            return;
++        }
++        mUnitImage[unit] = imageId;
++        mImageKnown[unit] = true;
++        MarkUnitDirty(unit);
+     }
+ 
+     void SetUnitSampler(uint32_t unit, uint32_t samplerId) {
+-        if (unit < kMaxTextureUnits) {
+-            mUnitSampler[unit] = samplerId;
+-            MarkUnitDirty(unit);
+-        }
++        if (unit >= kMaxTextureUnits) return;
++        if (mSamplerKnown[unit] && mUnitSampler[unit] == samplerId) {
++            ++mReusedTextureInputs;
++            return;
++        }
++        mUnitSampler[unit] = samplerId;
++        mSamplerKnown[unit] = true;
++        MarkUnitDirty(unit);
+     }
+ 
+     void ForEachStage(wgpu::ShaderStage visibility, auto&& fn) {
+@@ -265,6 +281,9 @@
+     uint32_t mStageMask = 0;
+     std::array<uint32_t, kMaxTextureUnits> mUnitImage{};
+     std::array<uint32_t, kMaxTextureUnits> mUnitSampler{};
++    std::bitset<kMaxTextureUnits> mImageKnown;
++    std::bitset<kMaxTextureUnits> mSamplerKnown;
++    uint32_t mReusedTextureInputs = 0;
+     uint32_t mDirtyUnitsBegin = kMaxTextureUnits;
+     uint32_t mDirtyUnitsEnd = 0;
+     bool mPlaceholderSamplerPending = true;
+@@ -672,18 +691,36 @@
+     uint32_t indexFormatSize = 2;
+     BindGroupTracker bindGroupTracker(cmdBuf);
+     uint32_t diagDraws = 0, diagPipelines = 0;
+-
+-    auto BindIndexBuffer = [&](uint32_t firstIndex) {
+-        dkCmdBufBindIdxBuffer(cmdBuf, indexFormat,
+-                              indexBuffer->GetGpuAddr() + indexBufferOffset);
+-        (void)firstIndex;
++    uint32_t reusedIndexState = 0;
++    DkGpuAddr boundIndexAddress = DK_GPU_ADDR_INVALID;
++    DkIdxFormat boundIndexFormat = DkIdxFormat_Uint16;
++    uint32_t boundRestartIndex = 0;
++    bool boundRestartEnabled = false;
++
++    // Render bundles replay through the same state setters as direct draws. The cache starts
++    // empty for each render pass, and the deko3d pipeline binds do not touch either register.
++    auto BindIndexBuffer = [&]() {
++        const DkGpuAddr address = indexBuffer->GetGpuAddr() + indexBufferOffset;
++        if (boundIndexAddress == address && boundIndexFormat == indexFormat) {
++            ++reusedIndexState;
++            return;
++        }
++        dkCmdBufBindIdxBuffer(cmdBuf, indexFormat, address);
++        boundIndexAddress = address;
++        boundIndexFormat = indexFormat;
+     };
+ 
+     auto SetPrimitiveRestart = [&]() {
+         const DkPrimitive primitive = lastPipeline->GetDkPrimitive();
+         const bool strip = primitive == DkPrimitive_LineStrip || primitive == DkPrimitive_TriangleStrip;
+-        dkCmdBufSetPrimitiveRestart(cmdBuf, strip,
+-                                    indexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : 0xFFFFu);
++        const uint32_t restartIndex = indexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : 0xFFFFu;
++        if (boundRestartEnabled == strip && boundRestartIndex == restartIndex) {
++            ++reusedIndexState;
++            return;
++        }
++        dkCmdBufSetPrimitiveRestart(cmdBuf, strip, restartIndex);
++        boundRestartEnabled = strip;
++        boundRestartIndex = restartIndex;
+     };
+ 
+     auto DoRenderBundleCommand = [&](CommandIterator* iter, Command type) -> MaybeError {
+@@ -709,7 +746,7 @@
+                 ++diagDraws;
+                 DAWN_TRY(bindGroupTracker.Apply());
+                 SetPrimitiveRestart();
+-                BindIndexBuffer(draw->firstIndex);
++                BindIndexBuffer();
+                 dkCmdBufDrawIndexed(cmdBuf, lastPipeline->GetDkPrimitive(), draw->indexCount,
+                                     draw->instanceCount, draw->firstIndex, draw->baseVertex,
+                                     draw->firstInstance);
+@@ -741,7 +778,7 @@
+                 DrawIndexedIndirectCmd* draw = iter->NextCommand<DrawIndexedIndirectCmd>();
+                 DAWN_TRY(bindGroupTracker.Apply());
+                 SetPrimitiveRestart();
+-                BindIndexBuffer(0);
++                BindIndexBuffer();
+                 IndirectDrawMetadata::ValidatedIndirectDraw validatedDraw =
+                     metadata.GetValidatedIndirectDraw(draw, indirectDrawIndex++);
+                 Buffer* indirectBuffer = ToBackend(validatedDraw.indirectBuffer.Get());
+@@ -838,6 +875,10 @@
+                     }
+                 }
+                 (void)indexFormatSize;
++                const uint32_t reusedTextures = bindGroupTracker.ReusedTextureInputs();
++                if ((reusedIndexState != 0 || reusedTextures != 0) && switch_frame_profiling_enabled()) {
++                    switch_record_deko_state_reuse(reusedIndexState, reusedTextures);
++                }
+                 return {};
+             }
+ 
