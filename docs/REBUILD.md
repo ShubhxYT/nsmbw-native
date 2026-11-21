@@ -363,6 +363,29 @@ directory that does not survive a reboot.
 
 ## 7. Build pipeline order
 
+### Standalone NSP builder
+
+Run `./make-nsmbw-switch.sh --disc /path/to/disc.rvz` from the repository root. Use a USA
+`SMNE01` revision 1 disc image and your local Switch packaging keys. With `--disc-dir`, pass the
+directory containing `sys/` and `files/`. `--out` selects the output and working directory.
+The default is `build/switch`, which contains the final NSP and the stage logs.
+
+The script extracts with nodtool, applies the Switch runtime and Aurora changes to a pinned
+upstream checkout, then runs the translator. The Docker build prepares Dawn and libuam for
+deko3d, compiles the native and generated sources, and uses `switch/rebuild.sh` to link and
+check relocations. The packaging container runs offline with read-only access to the local
+key file. It includes the extracted disc, Wii bootstrap files and shader seed in RomFS.
+
+The `standalone-runtime.patch` and `standalone-dawn.patch` capture the integrated source state
+for this builder. Apply further changes there when updating the pinned dependencies. The
+individual experiments below record the build history.
+
+Install the resulting NSP with your usual installer. You can rerun the command after fixing a
+dependency error. The first failing stage's log is in `build/switch/logs` unless you passed
+`--out`. Each concurrent build needs its own `--out` directory.
+
+### Manual development build
+
 1. **Full object build** — runtime, Aurora, generated shards, libraries, Abseil, mbedTLS, platform
    layer; position-independent, into one object directory.
 2. **Standard runtime libraries** — use the original devkitPro archives with the writable

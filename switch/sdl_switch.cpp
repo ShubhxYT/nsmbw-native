@@ -3,7 +3,7 @@
 // Aurora and the runtime are written against SDL3, which has no Switch backend. Rather than stub
 // the calls out, this provides the parts a console actually needs: one fullscreen window, one
 // virtual gamepad driven by HidNpad, a clock, an event queue, and the filesystem paths the runtime
-// uses for its data. Everything else (renderer, audio stream, mouse, keyboard text input) is
+// uses for its data, plus native audio output. Everything else (renderer, mouse, keyboard text input) is
 // present and harmless so the runtime's feature detection sees a coherent platform.
 //
 // Signatures are taken from the real SDL3 headers, so this file is checked against them.
@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -1427,15 +1428,92 @@ bool SDL_WriteS64LE(SDL_IOStream* s, int64_t v) { return SDL_WriteIO(s, &v, size
 } // extern "C"
 
 // ---------------------------------------------------------------------------------------------
-// Audio: a silent sink. The audren mixer is the next step; until then the runtime's audio thread
-// must not block, so queued data is consumed at the rate it is produced.
+// Audio: the runtime produces stereo PCM at Wii rates. audout plays 48 kHz PCM.
 // ---------------------------------------------------------------------------------------------
 
 struct SDL_AudioStream {
-  SDL_AudioSpec spec{};
-  std::atomic<uint64_t> queued{0};
-  std::atomic<bool> paused{false};
-  std::atomic<float> gain{1.f};
+  static constexpr int OutputRate = 48000;
+  static constexpr size_t SamplesPerBlock = OutputRate / 100 * 2;
+  static constexpr size_t PageSize = 0x1000;
+
+  struct Buffer {
+    alignas(PageSize) std::array<int16_t, PageSize / sizeof(int16_t)> samples{};
+    AudioOutBuffer native{};
+    bool queued = false;
+  };
+
+  // The runtime owns one stream and serializes all its operations with the audio backend mutex.
+  std::array<Buffer, 4> buffers{};
+  std::array<int16_t, SamplesPerBlock> pending{};
+  size_t filled = 0;
+  uint32_t inputRate = 0;
+  uint32_t phase = 0;
+  std::array<int16_t, 2> previous{};
+  bool hasPrevious = false;
+  bool paused = true;
+  bool reportedPlayback = false;
+  bool reportedBackpressure = false;
+  float gain = 1.f;
+
+  bool Reclaim() {
+    // libnx retrieves one buffer tag per call. Reclaim without waiting on the audio service event.
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      AudioOutBuffer* released = nullptr;
+      u32 count = 0;
+      const Result rc = audoutGetReleasedAudioOutBuffer(&released, &count);
+      if (R_FAILED(rc)) return SDL_SetError("audout release failed (0x%08x)", rc);
+      if (count == 0) break;
+      for (auto& buffer : buffers) {
+        if (&buffer.native == released) {
+          buffer.queued = false;
+          if (!reportedPlayback) {
+            reportedPlayback = true;
+            std::fputs("nsmbw: Switch audio playback buffers are being consumed\n", stderr);
+          }
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool Submit() {
+    if (filled == 0 || paused) return true;
+    if (!Reclaim()) return false;
+    for (auto& buffer : buffers) {
+      if (buffer.queued) continue;
+      buffer.native.buffer = buffer.samples.data();
+      buffer.native.buffer_size = PageSize;
+      buffer.native.data_size = filled * sizeof(int16_t);
+      if (gain == 1.f) {
+        std::memcpy(buffer.samples.data(), pending.data(), buffer.native.data_size);
+      } else {
+        for (size_t i = 0; i < filled; ++i) {
+          buffer.samples[i] = static_cast<int16_t>(std::clamp(pending[i] * gain, -32768.f, 32767.f));
+        }
+      }
+      armDCacheFlush(buffer.samples.data(), buffer.native.data_size);
+      const Result rc = audoutAppendAudioOutBuffer(&buffer.native);
+      if (R_FAILED(rc)) return SDL_SetError("audout submit failed (0x%08x)", rc);
+      buffer.queued = true;
+      filled = 0;
+      return true;
+    }
+    // Keep the four playback buffers bounded so a burst cannot add input latency.
+    if (!reportedBackpressure) {
+      reportedBackpressure = true;
+      std::fputs("nsmbw: Switch audio buffers full; dropping a 10 ms block\n", stderr);
+    }
+    filled = 0;
+    return true;
+  }
+
+  bool Append(int16_t left, int16_t right) {
+    if (filled == pending.size() && !Submit()) return false;
+    pending[filled++] = left;
+    pending[filled++] = right;
+    return filled < pending.size() || Submit();
+  }
 };
 
 extern "C" {
@@ -1449,64 +1527,125 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID device, const SDL_AudioS
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID device, const SDL_AudioSpec* spec,
                                            SDL_AudioStreamCallback callback, void* userdata) {
   (void)device;
-  (void)callback;
   (void)userdata;
-  auto* stream = new SDL_AudioStream();
-  if (spec) {
-    stream->spec = *spec;
+  if (!spec || callback || spec->channels != 2 || spec->format != SDL_AUDIO_S16LE ||
+      (spec->freq != 32000 && spec->freq != SDL_AudioStream::OutputRate)) {
+    SDL_SetError("Switch playback requires 32 or 48 kHz signed 16-bit stereo PCM");
+    return nullptr;
   }
-  return stream;
+  auto stream = std::unique_ptr<SDL_AudioStream>(new (std::nothrow) SDL_AudioStream());
+  if (!stream) {
+    SDL_SetError("Unable to allocate Switch playback buffers");
+    return nullptr;
+  }
+  const Result rc = audoutInitialize();
+  if (R_FAILED(rc)) {
+    SDL_SetError("audout initialization failed (0x%08x)", rc);
+    return nullptr;
+  }
+  if (audoutGetSampleRate() != SDL_AudioStream::OutputRate || audoutGetChannelCount() != 2 ||
+      audoutGetPcmFormat() != PcmFormat_Int16) {
+    audoutExit();
+    SDL_SetError("Unexpected Switch playback format");
+    return nullptr;
+  }
+  stream->inputRate = spec->freq;
+  std::fprintf(stderr, "nsmbw: Switch audio output opened (%d to %d Hz stereo)\n",
+               spec->freq, SDL_AudioStream::OutputRate);
+  return stream.release();
 }
 
-void SDL_DestroyAudioStream(SDL_AudioStream* stream) { delete stream; }
+void SDL_DestroyAudioStream(SDL_AudioStream* stream) {
+  if (!stream) return;
+  (void)audoutStopAudioOut();
+  audoutExit();
+  delete stream;
+}
 
 bool SDL_PutAudioStreamData(SDL_AudioStream* stream, const void* data, int len) {
-  (void)data;
-  if (stream && len > 0) {
-    stream->queued.fetch_add(static_cast<uint64_t>(len));
+  if (!stream || len < 0 || len % 4 != 0 || (!data && len != 0)) {
+    return SDL_SetError("Invalid Switch stereo PCM block");
   }
-  return stream != nullptr;
+  if (stream->paused) return true;
+  const auto* bytes = static_cast<const uint8_t*>(data);
+  for (int i = 0; i < len; i += 4) {
+    std::array<int16_t, 2> frame;
+    std::memcpy(frame.data(), bytes + i, sizeof(frame));
+    if (stream->inputRate == SDL_AudioStream::OutputRate || !stream->hasPrevious) {
+      if (!stream->Append(frame[0], frame[1])) return false;
+      stream->hasPrevious = true;
+      stream->phase = stream->inputRate;
+    } else {
+      // Carry the fractional source position across Wii DMA blocks.
+      while (stream->phase <= SDL_AudioStream::OutputRate) {
+        const auto interpolate = [&](size_t channel) {
+          const int32_t before = stream->previous[channel];
+          const int32_t delta = int32_t(frame[channel]) - before;
+          return static_cast<int16_t>(before +
+              int64_t(delta) * stream->phase / SDL_AudioStream::OutputRate);
+        };
+        if (!stream->Append(interpolate(0), interpolate(1))) return false;
+        stream->phase += stream->inputRate;
+      }
+      stream->phase -= SDL_AudioStream::OutputRate;
+    }
+    stream->previous = frame;
+  }
+  return true;
 }
 
 int SDL_GetAudioStreamQueued(SDL_AudioStream* stream) {
-  return stream ? static_cast<int>(stream->queued.load()) : 0;
+  if (!stream) return 0;
+  size_t bytes = stream->filled * sizeof(int16_t);
+  for (const auto& buffer : stream->buffers) {
+    if (buffer.queued) bytes += buffer.native.data_size;
+  }
+  return static_cast<int>(bytes * stream->inputRate / SDL_AudioStream::OutputRate);
 }
 
 int SDL_GetAudioStreamAvailable(SDL_AudioStream* stream) { return SDL_GetAudioStreamQueued(stream); }
 
 bool SDL_FlushAudioStream(SDL_AudioStream* stream) {
-  if (stream) {
-    stream->queued.store(0);
-  }
-  return stream != nullptr;
+  return stream && stream->Submit();
 }
 
-bool SDL_ClearAudioStream(SDL_AudioStream* stream) { return SDL_FlushAudioStream(stream); }
+bool SDL_ClearAudioStream(SDL_AudioStream* stream) {
+  if (!stream) return false;
+  bool flushed = false;
+  const Result rc = audoutFlushAudioOutBuffers(&flushed);
+  if (R_FAILED(rc)) return SDL_SetError("audout flush failed (0x%08x)", rc);
+  stream->filled = 0;
+  stream->hasPrevious = false;
+  return stream->Reclaim();
+}
 
 bool SDL_SetAudioStreamGain(SDL_AudioStream* stream, float gain) {
-  if (stream) {
-    stream->gain.store(gain);
-  }
-  return stream != nullptr;
+  if (!stream || !(gain >= 0.f)) return SDL_SetError("Invalid Switch audio stream gain");
+  stream->gain = gain;
+  return true;
 }
 
-float SDL_GetAudioStreamGain(SDL_AudioStream* stream) { return stream ? stream->gain.load() : 0.f; }
+float SDL_GetAudioStreamGain(SDL_AudioStream* stream) { return stream ? stream->gain : 0.f; }
 
 bool SDL_PauseAudioStreamDevice(SDL_AudioStream* stream) {
-  if (stream) {
-    stream->paused.store(true);
-  }
-  return stream != nullptr;
+  if (!stream) return false;
+  if (stream->paused) return true;
+  const Result rc = audoutStopAudioOut();
+  if (R_FAILED(rc)) return SDL_SetError("audout stop failed (0x%08x)", rc);
+  stream->paused = true;
+  return SDL_ClearAudioStream(stream);
 }
 
 bool SDL_ResumeAudioStreamDevice(SDL_AudioStream* stream) {
-  if (stream) {
-    stream->paused.store(false);
-  }
-  return stream != nullptr;
+  if (!stream) return false;
+  if (!stream->paused) return true;
+  const Result rc = audoutStartAudioOut();
+  if (R_FAILED(rc)) return SDL_SetError("audout start failed (0x%08x)", rc);
+  stream->paused = false;
+  return true;
 }
 
-bool SDL_AudioStreamDevicePaused(SDL_AudioStream* stream) { return stream ? stream->paused.load() : true; }
+bool SDL_AudioStreamDevicePaused(SDL_AudioStream* stream) { return !stream || stream->paused; }
 
 } // extern "C"
 

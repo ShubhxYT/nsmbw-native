@@ -1,0 +1,503 @@
+diff --git a/src/dawn/common/SystemUtils.cpp b/src/dawn/common/SystemUtils.cpp
+index eee5295..5c64555 100644
+--- a/src/dawn/common/SystemUtils.cpp
++++ b/src/dawn/common/SystemUtils.cpp
+@@ -50,6 +50,15 @@
+ 
+ #include <array>
+ 
++#if defined(__SWITCH__)
++// newlib provides these POSIX ABI symbols, but their declarations are hidden
++// by __STRICT_ANSI__ when Dawn is compiled with strict -std=c++20.
++extern "C" {
++int setenv(const char* name, const char* value, int overwrite);
++int unsetenv(const char* name);
++}
++#endif
++
+ namespace dawn {
+ 
+ #if DAWN_PLATFORM_IS(WINDOWS)
+diff --git a/src/dawn/native/deko3d/CommandBufferDeko3d.cpp b/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
+index f45d8af..ba02ef3 100644
+--- a/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
++++ b/src/dawn/native/deko3d/CommandBufferDeko3d.cpp
+@@ -29,6 +29,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <bitset>
+ #include <cstdio>
+ #include <cstring>
+ #include <vector>
+@@ -50,6 +51,9 @@
+ #include "src/dawn/native/deko3d/SamplerDeko3d.h"
+ #include "src/dawn/native/deko3d/TextureDeko3d.h"
+ 
++extern "C" bool switch_frame_profiling_enabled();
++extern "C" void switch_record_deko_state_reuse(uint32_t indexAndRestart, uint32_t textureInputs);
++
+ namespace dawn::native::deko3d {
+ 
+ namespace {
+@@ -106,6 +110,8 @@ class BindGroupTracker : public BindGroupTrackerBase<false> {
+         ResetUnits();
+     }
+ 
++    uint32_t ReusedTextureInputs() const { return mReusedTextureInputs; }
++
+     MaybeError Apply() {
+         BeforeApply();
+         for (BindGroupIndex index : mDirtyBindGroupsObjectChangedOrIsDynamic) {
+@@ -127,6 +133,8 @@ class BindGroupTracker : public BindGroupTrackerBase<false> {
+   private:
+     void ResetUnits() {
+         mPlaceholderSamplerPending = true;
++        mImageKnown.reset();
++        mSamplerKnown.reset();
+         mDirtyUnitsBegin = kMaxTextureUnits;
+         mDirtyUnitsEnd = 0;
+     }
+@@ -137,17 +145,25 @@ class BindGroupTracker : public BindGroupTrackerBase<false> {
+     }
+ 
+     void SetUnitImage(uint32_t unit, uint32_t imageId) {
+-        if (unit < kMaxTextureUnits) {
+-            mUnitImage[unit] = imageId;
+-            MarkUnitDirty(unit);
++        if (unit >= kMaxTextureUnits) return;
++        if (mImageKnown[unit] && mUnitImage[unit] == imageId) {
++            ++mReusedTextureInputs;
++            return;
+         }
++        mUnitImage[unit] = imageId;
++        mImageKnown[unit] = true;
++        MarkUnitDirty(unit);
+     }
+ 
+     void SetUnitSampler(uint32_t unit, uint32_t samplerId) {
+-        if (unit < kMaxTextureUnits) {
+-            mUnitSampler[unit] = samplerId;
+-            MarkUnitDirty(unit);
++        if (unit >= kMaxTextureUnits) return;
++        if (mSamplerKnown[unit] && mUnitSampler[unit] == samplerId) {
++            ++mReusedTextureInputs;
++            return;
+         }
++        mUnitSampler[unit] = samplerId;
++        mSamplerKnown[unit] = true;
++        MarkUnitDirty(unit);
+     }
+ 
+     void ForEachStage(wgpu::ShaderStage visibility, auto&& fn) {
+@@ -265,6 +281,9 @@ class BindGroupTracker : public BindGroupTrackerBase<false> {
+     uint32_t mStageMask = 0;
+     std::array<uint32_t, kMaxTextureUnits> mUnitImage{};
+     std::array<uint32_t, kMaxTextureUnits> mUnitSampler{};
++    std::bitset<kMaxTextureUnits> mImageKnown;
++    std::bitset<kMaxTextureUnits> mSamplerKnown;
++    uint32_t mReusedTextureInputs = 0;
+     uint32_t mDirtyUnitsBegin = kMaxTextureUnits;
+     uint32_t mDirtyUnitsEnd = 0;
+     bool mPlaceholderSamplerPending = true;
+@@ -672,18 +691,36 @@ MaybeError CommandBuffer::RecordRenderPass(DkCmdBuf cmdBuf,
+     uint32_t indexFormatSize = 2;
+     BindGroupTracker bindGroupTracker(cmdBuf);
+     uint32_t diagDraws = 0, diagPipelines = 0;
+-
+-    auto BindIndexBuffer = [&](uint32_t firstIndex) {
+-        dkCmdBufBindIdxBuffer(cmdBuf, indexFormat,
+-                              indexBuffer->GetGpuAddr() + indexBufferOffset);
+-        (void)firstIndex;
++    uint32_t reusedIndexState = 0;
++    DkGpuAddr boundIndexAddress = DK_GPU_ADDR_INVALID;
++    DkIdxFormat boundIndexFormat = DkIdxFormat_Uint16;
++    uint32_t boundRestartIndex = 0;
++    bool boundRestartEnabled = false;
++
++    // Render bundles replay through the same state setters as direct draws. The cache starts
++    // empty for each render pass, and the deko3d pipeline binds do not touch either register.
++    auto BindIndexBuffer = [&]() {
++        const DkGpuAddr address = indexBuffer->GetGpuAddr() + indexBufferOffset;
++        if (boundIndexAddress == address && boundIndexFormat == indexFormat) {
++            ++reusedIndexState;
++            return;
++        }
++        dkCmdBufBindIdxBuffer(cmdBuf, indexFormat, address);
++        boundIndexAddress = address;
++        boundIndexFormat = indexFormat;
+     };
+ 
+     auto SetPrimitiveRestart = [&]() {
+         const DkPrimitive primitive = lastPipeline->GetDkPrimitive();
+         const bool strip = primitive == DkPrimitive_LineStrip || primitive == DkPrimitive_TriangleStrip;
+-        dkCmdBufSetPrimitiveRestart(cmdBuf, strip,
+-                                    indexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : 0xFFFFu);
++        const uint32_t restartIndex = indexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : 0xFFFFu;
++        if (boundRestartEnabled == strip && boundRestartIndex == restartIndex) {
++            ++reusedIndexState;
++            return;
++        }
++        dkCmdBufSetPrimitiveRestart(cmdBuf, strip, restartIndex);
++        boundRestartEnabled = strip;
++        boundRestartIndex = restartIndex;
+     };
+ 
+     auto DoRenderBundleCommand = [&](CommandIterator* iter, Command type) -> MaybeError {
+@@ -709,7 +746,7 @@ MaybeError CommandBuffer::RecordRenderPass(DkCmdBuf cmdBuf,
+                 ++diagDraws;
+                 DAWN_TRY(bindGroupTracker.Apply());
+                 SetPrimitiveRestart();
+-                BindIndexBuffer(draw->firstIndex);
++                BindIndexBuffer();
+                 dkCmdBufDrawIndexed(cmdBuf, lastPipeline->GetDkPrimitive(), draw->indexCount,
+                                     draw->instanceCount, draw->firstIndex, draw->baseVertex,
+                                     draw->firstInstance);
+@@ -741,7 +778,7 @@ MaybeError CommandBuffer::RecordRenderPass(DkCmdBuf cmdBuf,
+                 DrawIndexedIndirectCmd* draw = iter->NextCommand<DrawIndexedIndirectCmd>();
+                 DAWN_TRY(bindGroupTracker.Apply());
+                 SetPrimitiveRestart();
+-                BindIndexBuffer(0);
++                BindIndexBuffer();
+                 IndirectDrawMetadata::ValidatedIndirectDraw validatedDraw =
+                     metadata.GetValidatedIndirectDraw(draw, indirectDrawIndex++);
+                 Buffer* indirectBuffer = ToBackend(validatedDraw.indirectBuffer.Get());
+@@ -838,6 +875,10 @@ MaybeError CommandBuffer::RecordRenderPass(DkCmdBuf cmdBuf,
+                     }
+                 }
+                 (void)indexFormatSize;
++                const uint32_t reusedTextures = bindGroupTracker.ReusedTextureInputs();
++                if ((reusedIndexState != 0 || reusedTextures != 0) && switch_frame_profiling_enabled()) {
++                    switch_record_deko_state_reuse(reusedIndexState, reusedTextures);
++                }
+                 return {};
+             }
+ 
+diff --git a/src/dawn/native/deko3d/DeviceDeko3d.cpp b/src/dawn/native/deko3d/DeviceDeko3d.cpp
+index 2689b32..0d34fa2 100644
+--- a/src/dawn/native/deko3d/DeviceDeko3d.cpp
++++ b/src/dawn/native/deko3d/DeviceDeko3d.cpp
+@@ -30,6 +30,7 @@
+ #include <switch.h>
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstdio>
+ #include <cstring>
+ #include <utility>
+@@ -55,6 +56,12 @@
+ #include "src/dawn/native/deko3d/SwapChainDeko3d.h"
+ #include "src/dawn/native/deko3d/TextureDeko3d.h"
+ 
++extern "C" bool switch_frame_profiling_enabled();
++extern "C" uint64_t switch_gpu_sample_tag();
++extern "C" void switch_record_gpu_frame_part(uint64_t tag, uint64_t begin, uint64_t end);
++extern "C" void switch_record_dk_gpu_list(uint64_t nanos);
++extern "C" void switch_record_dk_fence_wait(uint64_t nanos);
++
+ namespace dawn::native::deko3d {
+ 
+ namespace {
+@@ -206,6 +213,9 @@ void Device::DestroyImpl(DestroyReason reason) {
+             return;
+         }
+         dkCmdBufDestroy(entry->cmdBuf);
++        if (entry->profileTimestamps != nullptr) {
++            dkMemBlockDestroy(entry->profileTimestamps);
++        }
+         for (DkMemBlock block : entry->memory) {
+             dkMemBlockDestroy(block);
+         }
+@@ -297,6 +307,24 @@ DkCmdBuf Device::GetPendingCommandBuffer() {
+                                          kMaxSamplerDescriptors);
+         if (kDeko3dTrace) TraceFlush("after descriptor set bind");
+     }
++    // Tag only the real game and composition submissions selected by Aurora. The start
++    // marker goes immediately before their commands even if uploads are already queued.
++    const uint64_t tag = switch_gpu_sample_tag();
++    if (tag != 0 && mCmdBuf->profileTag == 0) {
++        auto& timestamps = mCmdBuf->profileTimestamps;
++        if (timestamps == nullptr) {
++            DkMemBlockMaker maker;
++            dkMemBlockMakerDefaults(&maker, mDkDevice, DK_MEMBLOCK_ALIGNMENT);
++            maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
++            timestamps = dkMemBlockCreate(&maker);
++        }
++        if (timestamps != nullptr) {
++            std::memset(dkMemBlockGetCpuAddr(timestamps), 0, 32);
++            dkCmdBufReportCounter(cmdBuf, DkCounter_TimestampPipelineTop,
++                                  dkMemBlockGetGpuAddr(timestamps));
++            mCmdBuf->profileTag = tag;
++        }
++    }
+     return cmdBuf;
+ }
+ 
+@@ -313,6 +341,10 @@ MaybeError Device::SubmitPendingCommands(ExecutionSerial serial) {
+     auto inFlight = std::make_unique<InFlight>();
+     inFlight->serial = serial;
+     if (mHasPendingCommands) {
++        if (mCmdBuf->profileTag != 0) {
++            dkCmdBufReportCounter(mCmdBuf->cmdBuf, DkCounter_Timestamp,
++                                  dkMemBlockGetGpuAddr(mCmdBuf->profileTimestamps) + 16);
++        }
+         DkCmdList list = dkCmdBufFinishList(mCmdBuf->cmdBuf);
+         dkQueueSubmitCommands(mDkQueue, list);
+         // The list lives in this command buffer's memory until the fence signals; record the next
+@@ -348,6 +380,17 @@ void Device::ReleaseResourcesUpTo(ExecutionSerial completed) {
+         std::unique_ptr<InFlight> done = std::move(mInFlight.front());
+         mInFlight.pop_front();
+         if (done->cmdBuf != nullptr) {
++            if (done->cmdBuf->profileTag != 0) {
++                const auto* reports =
++                    static_cast<const uint64_t*>(dkMemBlockGetCpuAddr(done->cmdBuf->profileTimestamps));
++                if (reports[1] != 0 && reports[3] > reports[1]) {
++                    switch_record_dk_gpu_list(dkTimestampToNs(reports[3] - reports[1]));
++                    switch_record_gpu_frame_part(done->cmdBuf->profileTag,
++                                                 dkTimestampToNs(reports[1]),
++                                                 dkTimestampToNs(reports[3]));
++                }
++                done->cmdBuf->profileTag = 0;
++            }
+             dkCmdBufClear(done->cmdBuf->cmdBuf);
+             // Clear rewinds to the most recently added chunk; earlier chunks are no longer used.
+             auto& memory = done->cmdBuf->memory;
+@@ -389,6 +432,10 @@ ExecutionSerial Device::PollCompletedSerial() {
+ }
+ 
+ ExecutionSerial Device::WaitForSerial(ExecutionSerial serial, Nanoseconds timeout) {
++    using Clock = std::chrono::steady_clock;
++    const bool profile = switch_frame_profiling_enabled() &&
++                         !mInFlight.empty() && mInFlight.front()->serial <= serial;
++    const auto start = profile ? Clock::now() : Clock::time_point{};
+     for (const auto& inFlight : mInFlight) {
+         if (inFlight->serial > serial) {
+             break;
+@@ -398,6 +445,10 @@ ExecutionSerial Device::WaitForSerial(ExecutionSerial serial, Nanoseconds timeou
+             break;
+         }
+     }
++    if (profile) {
++        switch_record_dk_fence_wait(
++            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
++    }
+     return PollCompletedSerial();
+ }
+ 
+@@ -666,8 +717,10 @@ void Device::RecordBufferWrite(DkGpuAddr dst, const uint8_t* data, uint64_t size
+ }
+ 
+ namespace {
+-constexpr uint32_t kImageChunkSize = 64 * 1024 * 1024;
+-constexpr uint32_t kDedicatedImageThreshold = 16 * 1024 * 1024;
++// Keep individual allocations small on Horizon. Large contiguous blocks can
++// fail during the opening cutscene even when smaller texture allocations fit.
++constexpr uint32_t kImageChunkSize = 16 * 1024 * 1024;
++constexpr uint32_t kDedicatedImageThreshold = kImageChunkSize;
+ }  // namespace
+ 
+ MaybeError Device::AllocateImageMemory(uint32_t size, uint32_t alignment, ImageAllocation* out) {
+diff --git a/src/dawn/native/deko3d/DeviceDeko3d.h b/src/dawn/native/deko3d/DeviceDeko3d.h
+index 380daf9..1709c0f 100644
+--- a/src/dawn/native/deko3d/DeviceDeko3d.h
++++ b/src/dawn/native/deko3d/DeviceDeko3d.h
+@@ -191,6 +191,7 @@ class Device final : public DeviceBase {
+     DkDevice mDkDevice = nullptr;
+     DkQueue mDkQueue = nullptr;
+     bool mHasPendingCommands = false;
++    [[maybe_unused]] uint32_t mProfileListCount = 0;
+ 
+     // A DkCmdBuf with the memory it has been given. dkCmdBufClear rewinds into the last chunk, so a
+     // command buffer may only be cleared and reused once the GPU has finished its submitted lists.
+@@ -198,6 +199,8 @@ class Device final : public DeviceBase {
+         DkDevice device = nullptr;
+         DkCmdBuf cmdBuf = nullptr;
+         std::vector<DkMemBlock> memory;
++        DkMemBlock profileTimestamps = nullptr;
++        uint64_t profileTag = 0;
+     };
+     MaybeError AcquireCommandBuffer();
+     std::unique_ptr<CmdBufEntry> mCmdBuf;
+diff --git a/src/dawn/native/deko3d/ShaderModuleDeko3d.cpp b/src/dawn/native/deko3d/ShaderModuleDeko3d.cpp
+index e46fccf..f7f9371 100644
+--- a/src/dawn/native/deko3d/ShaderModuleDeko3d.cpp
++++ b/src/dawn/native/deko3d/ShaderModuleDeko3d.cpp
+@@ -27,7 +27,9 @@
+ 
+ #include "src/dawn/native/deko3d/ShaderModuleDeko3d.h"
+ 
++#include <cstdlib>
+ #include <sstream>
++#include <string_view>
+ #include <utility>
+ 
+ #include "dawn/platform/DawnPlatform.h"
+@@ -297,6 +299,9 @@ ResultOrError<std::string> ShaderModule::CompileShader(const ProgrammableStage&
+         .map = BuildSubstituteOverridesTransformConfig(programmableStage),
+     };
+     req.tintOptions.disable_robustness = !GetDevice()->IsRobustnessEnabled();
++    // No texture_builtins_from_uniform on deko3d: textureNumLevels from texture clamping
++    // cannot be lowered, so clamp buffers only.
++    req.tintOptions.disable_texture_robustness = true;
+     req.tintOptions.disable_workgroup_init =
+         GetDevice()->IsToggleEnabled(Toggle::DisableWorkgroupInit);
+     req.tintOptions.strip_all_names = !GetDevice()->IsToggleEnabled(Toggle::DisableSymbolRenaming);
+@@ -305,7 +310,17 @@ ResultOrError<std::string> ShaderModule::CompileShader(const ProgrammableStage&
+         GetDevice()->IsToggleEnabled(Toggle::DisablePolyfillsOnIntegerDivisonAndModulo);
+     req.tintOptions.disable_integer_range_analysis =
+         !GetDevice()->IsToggleEnabled(Toggle::EnableIntegerRangeAnalysisInRobustness);
+-    req.tintOptions.use_uniform_buffers = true;
++    // Uniform buffers keep WGSL's layout only when Tint decomposes them into array<vec4u>: a
++    // GLSL uniform block is std140, which rounds every array element up to 16 bytes, while
++    // WGSL's uniform_buffer_standard_layout (used by aurora's GX uniforms, array<u32, 12>) packs
++    // them tightly. With std140 blocks every member behind such an array reads the wrong offset.
++    // AURORA_GFX_FLAGS=dk_uniformblocks restores the std140 blocks for A/B runs.
++    {
++        const char* env = std::getenv("AURORA_GFX_FLAGS");
++        const std::string_view flags = env != nullptr ? env : "";
++        req.tintOptions.use_uniform_buffers =
++            flags.find("dk_uniformblocks") != std::string_view::npos;
++    }
+ 
+     CacheResult<DkshCompilation> compilationResult;
+     DAWN_TRY_LOAD_OR_RUN(
+diff --git a/src/dawn/native/deko3d/UamCompilerDeko3d.cpp b/src/dawn/native/deko3d/UamCompilerDeko3d.cpp
+index fadb53b..8792893 100644
+--- a/src/dawn/native/deko3d/UamCompilerDeko3d.cpp
++++ b/src/dawn/native/deko3d/UamCompilerDeko3d.cpp
+@@ -29,6 +29,7 @@
+ // only translation unit that sees mesa headers.
+ #include "src/dawn/native/deko3d/UamCompilerDeko3d.h"
+ 
++#include <cstdint>
+ #include <mutex>
+ #include <vector>
+ 
+@@ -61,9 +62,15 @@ bool CompileGlslToDksh(SingleShaderStage stage,
+         *error = "uam rejected the shader (details were written to stderr)";
+         return false;
+     }
+-    std::vector<uint8_t> bytes;
++    // Pinned libuam takes caller-owned memory and aligns absolute pointers
++    // to 256 bytes while serializing DKSH. Its base must have that alignment.
++    const size_t size = compiler.CalculateDkshSize();
++    std::vector<uint8_t> storage(size + 255);
++    const auto aligned = (reinterpret_cast<std::uintptr_t>(storage.data()) + 255) &
++                         ~std::uintptr_t{255};
++    auto* bytes = reinterpret_cast<uint8_t*>(aligned);
+     compiler.OutputDkshToMemory(bytes);
+-    dksh->assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
++    dksh->assign(reinterpret_cast<const char*>(bytes), size);
+     return true;
+ }
+ 
+diff --git a/src/dawn/native/utils/WGPUHelpers.cpp b/src/dawn/native/utils/WGPUHelpers.cpp
+index c8dde71..7d90e1b 100644
+--- a/src/dawn/native/utils/WGPUHelpers.cpp
++++ b/src/dawn/native/utils/WGPUHelpers.cpp
+@@ -236,7 +236,17 @@ std::string_view NormalizeMessageString(StringView in) {
+     if (in.IsUndefined()) {
+         return {};
+     }
++#if defined(__SWITCH__)
++    // strnlen() is hidden by strict C++20 in newlib. Stop at the first NUL
++    // or the explicit bound; WGPU_STRLEN also works for terminated strings.
++    size_t length = 0;
++    while (length < in.length && DAWN_UNSAFE_TODO(in.data[length]) != '\0') {
++        ++length;
++    }
++    return std::string_view(in.data, length);
++#else
+     return std::string_view(in.data, DAWN_UNSAFE_TODO(strnlen(in.data, in.length)));
++#endif
+ }
+ 
+ }  // namespace dawn::native::utils
+diff --git a/src/dawn/utils/SystemUtils.cpp b/src/dawn/utils/SystemUtils.cpp
+index 33a7bab..ceab39e 100644
+--- a/src/dawn/utils/SystemUtils.cpp
++++ b/src/dawn/utils/SystemUtils.cpp
+@@ -29,7 +29,9 @@
+ 
+ #include "src/utils/platform.h"
+ 
+-#if DAWN_PLATFORM_IS(WINDOWS)
++#if defined(__SWITCH__)
++#include <switch.h>
++#elif DAWN_PLATFORM_IS(WINDOWS)
+ #include "src/utils/windows_with_undefs.h"
+ #elif DAWN_PLATFORM_IS(POSIX)
+ #include <unistd.h>
+@@ -39,7 +41,13 @@
+ 
+ namespace dawn::utils {
+ 
+-#if DAWN_PLATFORM_IS(WINDOWS)
++#if defined(__SWITCH__)
++void USleep(unsigned int usecs) {
++    // Strict -std=c++20 hides newlib's usleep(). Horizon takes nanoseconds.
++    // Widen before conversion so the full unsigned-microsecond range fits.
++    svcSleepThread(static_cast<int64_t>(usecs) * 1000);
++}
++#elif DAWN_PLATFORM_IS(WINDOWS)
+ void USleep(unsigned int usecs) {
+     Sleep(static_cast<DWORD>(usecs / 1000));
+ }
+diff --git a/src/tint/lang/glsl/writer/common/options.h b/src/tint/lang/glsl/writer/common/options.h
+index cca6e97..d4f0b9d 100644
+--- a/src/tint/lang/glsl/writer/common/options.h
++++ b/src/tint/lang/glsl/writer/common/options.h
+@@ -166,6 +166,11 @@ struct Options {
+     /// Set to `true` to enable integer range analysis in robustness transform.
+     bool disable_integer_range_analysis = false;
+ 
++    /// Set to `true` to keep buffer robustness but skip clamping of texture builtin arguments.
++    /// Texture clamping emits `textureNumLevels`, which the GLSL path serves from a uniform
++    /// buffer that a backend must fill (see texture_builtins_from_uniform); deko3d does not.
++    bool disable_texture_robustness = false;
++
+     /// Set to `true` to disable workgroup memory zero initialization
+     bool disable_workgroup_init = false;
+ 
+@@ -237,6 +242,7 @@ struct Options {
+                  strip_all_names,
+                  disable_robustness,
+                  disable_integer_range_analysis,
++                 disable_texture_robustness,
+                  disable_workgroup_init,
+                  disable_polyfill_integer_div_mod,
+                  use_array_length_from_uniform,
+diff --git a/src/tint/lang/glsl/writer/raise/raise.cc b/src/tint/lang/glsl/writer/raise/raise.cc
+index 397480d..a2d575f 100644
+--- a/src/tint/lang/glsl/writer/raise/raise.cc
++++ b/src/tint/lang/glsl/writer/raise/raise.cc
+@@ -83,6 +83,7 @@ Result<SuccessType> Raise(core::ir::Module& module, const Options& options) {
+     if (!options.disable_robustness) {
+         core::ir::transform::RobustnessConfig config{};
+         config.use_integer_range_analysis = !options.disable_integer_range_analysis;
++        config.clamp_texture = !options.disable_texture_robustness;
+         TINT_CHECK_RESULT(core::ir::transform::Robustness(module, config));
+ 
+         TINT_CHECK_RESULT(core::ir::transform::PreventInfiniteLoops(module));
+diff --git a/src/tint/utils/text_generator/text_generator.cc b/src/tint/utils/text_generator/text_generator.cc
+index a2a6163..a9dd9f2 100644
+--- a/src/tint/utils/text_generator/text_generator.cc
++++ b/src/tint/utils/text_generator/text_generator.cc
+@@ -116,7 +116,17 @@ std::string TextGenerator::TextBuffer::String(uint32_t indent /* = 0 */) const {
+ 
+ std::string TextGenerator::TextBuffer::MinifiedString() const {
+     /// Returns `true` if @p c is the start of an identifier codepoint.
++#ifdef __SWITCH__
++    // isascii() is a non-ISO newlib extension hidden by strict -std=c++20.
++    // UTF-8 continuation/leading bytes are identifier bytes here, matching
++    // the upstream !isascii(c) behavior without enabling GNU extensions.
++    auto is_ident_char = [](char c) {
++        const auto uc = static_cast<unsigned char>(c);
++        return std::isalnum(uc) || c == '_' || uc > 0x7f;
++    };
++#else
+     auto is_ident_char = [](char c) { return std::isalnum(c) || c == '_' || !isascii(c); };
++#endif
+ 
+     bool previous_is_ident = false;
+     bool in_whitespace = false;

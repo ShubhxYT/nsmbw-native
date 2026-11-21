@@ -6,3 +6,6 @@ logs/
 __pycache__/
 *.o
 *.a
+*.nsp
+*.keys
+keys.dat

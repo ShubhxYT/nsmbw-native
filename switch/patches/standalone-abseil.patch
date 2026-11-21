@@ -1,0 +1,88 @@
+diff --git a/absl/base/config.h b/absl/base/config.h
+index 0b22167..7543abb 100644
+--- a/absl/base/config.h
++++ b/absl/base/config.h
+@@ -380,7 +380,9 @@ static_assert(ABSL_INTERNAL_INLINE_NAMESPACE_STR[0] != 'h' ||
+     defined(__asmjs__) || defined(__EMSCRIPTEN__) || defined(__Fuchsia__) || \
+     defined(__sun) || defined(__myriad2__) || defined(__HAIKU__) ||          \
+     defined(__OpenBSD__) || defined(__NetBSD__) || defined(__QNX__) ||       \
+-    defined(__VXWORKS__) || defined(__hexagon__)
++    defined(__VXWORKS__) || defined(__hexagon__) || defined(__SWITCH__)
++// Horizon (Nintendo Switch) has no mmap syscall, but the port supplies an anonymous-mapping
++// allocator over the heap (see switch/absl_horizon.cpp), which is all LowLevelAlloc needs.
+ #define ABSL_HAVE_MMAP 1
+ #endif
+ 
+diff --git a/absl/base/internal/sysinfo.cc b/absl/base/internal/sysinfo.cc
+index 79eaba3..6123e04 100644
+--- a/absl/base/internal/sysinfo.cc
++++ b/absl/base/internal/sysinfo.cc
+@@ -141,6 +141,9 @@ static int GetNumCPUs() {
+   return hardware_concurrency ? hardware_concurrency : 1;
+ #elif defined(_AIX)
+   return sysconf(_SC_NPROCESSORS_ONLN);
++#elif defined(__SWITCH__)
++  // Every Switch model exposes four application cores; Horizon has no sysconf for this.
++  return 4;
+ #else
+   // Other possibilities:
+   //  - Read /sys/devices/system/cpu/online and use cpumask_parse()
+@@ -461,6 +464,15 @@ pid_t GetTID() {
+   return reinterpret_cast<pid_t>(thread);
+ }
+ 
++#elif defined(__SWITCH__)
++
++// Horizon has no gettid and its pthread_t is an opaque struct pointer. The numeric thread id is the
++// one libnx assigns, which is what GetTID's callers use it for (identity and diagnostics).
++pid_t GetTID() {
++  // pthread_t is an opaque pointer here; its address is a stable per-thread identifier.
++  return static_cast<pid_t>((reinterpret_cast<uintptr_t>(pthread_self()) >> 4) & 0x7fffffff);
++}
++
+ #else
+ 
+ // Fallback implementation of `GetTID` using `pthread_self`.
+diff --git a/absl/flags/internal/flag.cc b/absl/flags/internal/flag.cc
+index 981f19f..efe5657 100644
+--- a/absl/flags/internal/flag.cc
++++ b/absl/flags/internal/flag.cc
+@@ -392,14 +392,11 @@ std::string FlagImpl::CurrentValue() const {
+ }
+ 
+ void FlagImpl::SetCallback(const FlagCallbackFunc mutation_callback) {
+-  absl::MutexLock l(DataGuard());
+-
+-  if (callback_ == nullptr) {
+-    callback_ = new FlagCallback;
+-  }
+-  callback_->func = mutation_callback;
+-
+-  InvokeCallback();
++  // NSMBW (Switch port): this runs during static initialisation for every ABSL_FLAG in the link,
++  // and acquiring the flag's absl::Mutex there aborts with an instruction fault on Horizon (see
++  // docs/switch-handoff.md). Nothing in the runtime registers or observes flag mutations, so the
++  // callback is not installed at all.
++  (void)mutation_callback;
+ }
+ 
+ void FlagImpl::InvokeCallback() const {
+diff --git a/absl/flags/reflection.cc b/absl/flags/reflection.cc
+index ea856ff..25a7fb3 100644
+--- a/absl/flags/reflection.cc
++++ b/absl/flags/reflection.cc
+@@ -190,7 +190,13 @@ void ForEachFlag(std::function<void(CommandLineFlag&)> visitor) {
+ // --------------------------------------------------------------------
+ 
+ bool RegisterCommandLineFlag(CommandLineFlag& flag, const char* filename) {
+-  FlagRegistry::GlobalRegistry().RegisterFlag(flag, filename);
++  // NSMBW (Switch port): abseil's registry faults during static initialisation on Horizon with an
++  // instruction abort, which takes the whole process down before main(). The game runtime never
++  // reads or writes absl flags, so registration is skipped instead of being left to break startup.
++  // GetFlag/SetFlag would find nothing registered; nothing in the port calls them.
++  // See docs/switch-handoff.md.
++  (void)flag;
++  (void)filename;
+   return true;
+ }
+ 

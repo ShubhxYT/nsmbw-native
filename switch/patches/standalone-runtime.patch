@@ -1,0 +1,3712 @@
+diff --git a/aurora-main/include/aurora/aurora.h b/aurora-main/include/aurora/aurora.h
+index b2c2974..af735c0 100644
+--- a/aurora-main/include/aurora/aurora.h
++++ b/aurora-main/include/aurora/aurora.h
+@@ -22,6 +22,7 @@ typedef enum {
+   BACKEND_OPENGLES,
+   BACKEND_WEBGPU,
+   BACKEND_NULL,
++  BACKEND_DEKO3D,
+ } AuroraBackend;
+ 
+ typedef enum {
+diff --git a/aurora-main/include/dolphin/gx/GXAurora.h b/aurora-main/include/dolphin/gx/GXAurora.h
+index ea15b57..6b4611d 100644
+--- a/aurora-main/include/dolphin/gx/GXAurora.h
++++ b/aurora-main/include/dolphin/gx/GXAurora.h
+@@ -151,6 +151,10 @@ uint64_t AuroraEndCommandDigest(void);
+ // NSMBW: aurora's vertex descriptor (vcdLo, vcdHi), format `fmt`'s attribute table (vatA/B/C) and
+ // normal type, as last set through the GX API.
+ void AuroraGetVtxFormatRegs(uint32_t fmt, uint32_t out[6]);
++#if defined(NSMBW_USE_DEKO3D)
++void AuroraGetVtxShadow(uint32_t fmt, uint32_t out[7]);
++bool AuroraResendVtxShadow(uint32_t fmt, const uint32_t expected[7]);
++#endif
+ // NSMBW: with the GX thread (NSMBW_GX_THREAD=1), waits until it has decoded everything queued, so
+ // memory a queued command points at may be reused. A no-op otherwise.
+ void AuroraGxSync(void);
+diff --git a/aurora-main/include/dolphin/gx/GXGeometry.h b/aurora-main/include/dolphin/gx/GXGeometry.h
+index a71eb74..b863064 100644
+--- a/aurora-main/include/dolphin/gx/GXGeometry.h
++++ b/aurora-main/include/dolphin/gx/GXGeometry.h
+@@ -22,9 +22,6 @@ void GXSetPointSize(u8 pointSize, GXTexOffset texOffsets);
+ void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_enable);
+ #ifdef TARGET_PC
+ void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le);
+-static inline void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
+-  GXSetArray(attr, data, size, stride, false);
+-}
+ #define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))
+ #else
+ void GXSetArray(GXAttr attr, const void* data, u8 stride);
+@@ -40,4 +37,15 @@ static inline void GXSetTexCoordGen(GXTexCoordID dst_coord, GXTexGenType func, G
+ }
+ #endif
+ 
++// The four-argument convenience overload needs an explicit extern "C++": a function redeclared at
++// namespace scope inherits the linkage of the earlier declaration, so without this GCC treats the
++// overload as a conflicting C function. Clang does not apply that rule to overloads, GCC does.
++#if defined(__cplusplus) && defined(TARGET_PC)
++extern "C++" {
++static inline void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
++  GXSetArray(attr, data, size, stride, false);
++}
++}
++#endif
++
+ #endif
+diff --git a/aurora-main/include/dolphin/types.h b/aurora-main/include/dolphin/types.h
+index 48c51bf..db219de 100644
+--- a/aurora-main/include/dolphin/types.h
++++ b/aurora-main/include/dolphin/types.h
+@@ -7,7 +7,7 @@
+ #define BIT_64 0
+ #endif
+ 
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) || defined(__SWITCH__)
+ #include <stdint.h>
+ typedef int8_t s8;
+ typedef int16_t s16;
+@@ -46,7 +46,7 @@ typedef volatile f64 vf64;
+ 
+ typedef char *Ptr;
+ 
+-#if defined(TARGET_PC)
++#if defined(TARGET_PC) || defined(__SWITCH__)
+ #include <stdbool.h>
+ typedef int BOOL;
+ #ifndef FALSE
+diff --git a/aurora-main/lib/aurora.cpp b/aurora-main/lib/aurora.cpp
+index cd2bcfb..db05f0b 100644
+--- a/aurora-main/lib/aurora.cpp
++++ b/aurora-main/lib/aurora.cpp
+@@ -35,6 +35,11 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
++
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#include "switch/worker_affinity.h"
++#endif
+ #include <cmath>
+ #include <condition_variable>
+ #include <cstdio>
+@@ -311,6 +316,9 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
+ #endif
+ 
+ void frame_worker_main() noexcept {
++#if defined(NSMBW_USE_DEKO3D)
++  Log.info("Switch frame worker affinity: {}", SwitchPinGraphicsWorker(2) ? "CPU 2" : "system default");
++#endif
+   {
+     std::lock_guard lock(g_frameWorker.mutex);
+     g_frameWorker.threadId = std::this_thread::get_id();
+@@ -381,6 +389,11 @@ bool frame_worker_phase_reached(FrameWorkerPhase phase) noexcept {
+ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::microseconds timeout) noexcept;
+ 
+ void wait_for_frame_worker_private(FrameWorkerPhase phase) noexcept {
++#if defined(NSMBW_USE_DEKO3D)
++  const auto waitPhase = phase == FrameWorkerPhase::Sealed ? SwitchFramePhase::WorkerWaitSealed
++                                                            : SwitchFramePhase::WorkerWaitDone;
++  const SwitchFrameTimer timing(waitPhase, !frame_worker_phase_reached(phase));
++#endif
+   constexpr auto kWaitServiceInterval = std::chrono::milliseconds(1);
+   while (!wait_for_frame_worker_private_for(phase, kWaitServiceInterval)) {
+   }
+@@ -623,12 +636,17 @@ constexpr const char* backend_name(AuroraBackend backend) noexcept {
+     return "WebGPU";
+   case BACKEND_NULL:
+     return "Null";
++  case BACKEND_DEKO3D:
++    return "deko3d";
+   }
+   return "Unknown";
+ }
+ 
+ #ifdef AURORA_ENABLE_GX
+ constexpr std::array PreferredBackendOrder{
++#ifdef NSMBW_USE_DEKO3D
++    BACKEND_DEKO3D,
++#endif
+ #ifdef ENABLE_BACKEND_WEBGPU
+     BACKEND_WEBGPU,
+ #endif
+@@ -890,6 +908,9 @@ struct PresentationJob {
+   bool duplicated = false;
+   // Whole display periods the group slid forward at encode time (late group).
+   uint32_t slidPeriods = 0;
++#if defined(NSMBW_USE_DEKO3D)
++  PresentClock::time_point queuedAt{};
++#endif
+ };
+ 
+ std::array<std::vector<std::shared_ptr<PresentationImage>>, gx::MaxInterpolatedFrames + 1>
+@@ -980,6 +1001,13 @@ bool present_presentation_job(const PresentationJob& job) {
+       acquireDuration =
+           std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() - acquireStarted);
+       g_lastAcquireNanos.store(acquireDuration.count(), std::memory_order_relaxed);
++#if defined(NSMBW_USE_DEKO3D)
++      if (job.queuedAt != PresentClock::time_point{}) {
++        const auto queued = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            submissionStarted - job.queuedAt);
++        switch_record_present_latency(queued.count(), acquireDuration.count());
++      }
++#endif
+       if (acquired) {
+         const wgpu::CommandEncoderDescriptor encoderDescriptor{
+             .label = "Presentation encoder",
+@@ -1019,6 +1047,9 @@ bool present_presentation_job(const PresentationJob& job) {
+         const auto submitStarted = PresentClock::now();
+         {
+           std::lock_guard submitLock(g_queueSubmitMutex);
++#if defined(NSMBW_USE_DEKO3D)
++          const SwitchGpuFrameSample profile(job.logicalFrame, true, !job.interpolated);
++#endif
+           g_queue.Submit(1, &buffer);
+         }
+         submitDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -1252,7 +1283,14 @@ void enqueue_presentations(std::vector<PresentationJob>&& jobs) {
+       }
+     }
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  const auto queuedAt = switch_frame_profiling_enabled() ? PresentClock::now()
++                                                       : PresentClock::time_point{};
++#endif
+   for (auto& job : jobs) {
++#if defined(NSMBW_USE_DEKO3D)
++    job.queuedAt = queuedAt;
++#endif
+     g_presenter.jobs.emplace_back(std::move(job));
+   }
+   lock.unlock();
+@@ -1661,6 +1699,9 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame,
+   const auto submitEncodedSlot = [&](wgpu::CommandEncoder& target, bool releaseMetalFXOutput = true) {
+     const auto buffer = target.Finish(&cmdBufDescriptor);
+     std::lock_guard submitLock(g_queueSubmitMutex);
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchGpuFrameSample profile(ctx.logicalFrame, false, !ctx.interpolationActive);
++#endif
+     g_queue.Submit(1, &buffer);
+     if (releaseMetalFXOutput && g_metalfxPendingOutput) {
+       if (!g_metalfxPendingOutput->end_output()) metalfx_failed(g_metalfxPendingOutput->error());
+@@ -1879,16 +1920,24 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
+     // NSMBW: overlap the encode with the producer's next frame without interpolation too. Encoding
+     // and submitting in the SEALED phase made the producer's first drain of every frame (EGG's
+     // GXDrawDone) wait out the whole encode: a quarter of the game thread's time on a Pixel 3 XL.
+-    // Android only: desktop GPUs encode well inside a frame, and there the serial order (0.1.1's)
+-    // stays, since players felt 0.2.x's presentation as stutterier. NSMBW_SERIAL_ENCODE=1 or
+-    // NSMBW_OVERLAP_ENCODE=1 picks one either way.
+-#ifdef __ANDROID__
++    // Android and Switch deko3d overlap by default. Desktop keeps the serial order for pacing.
++#if defined(__ANDROID__) || defined(NSMBW_USE_DEKO3D)
+     static const bool serialEncode = std::getenv("NSMBW_SERIAL_ENCODE") != nullptr;
+ #else
+     static const bool serialEncode = std::getenv("NSMBW_OVERLAP_ENCODE") == nullptr;
++#endif
++#if defined(NSMBW_USE_DEKO3D)
++    static const bool loggedEncodeMode = [] {
++      Log.info("Switch render encoding: {}", serialEncode ? "serial" : "overlapping");
++      return true;
++    }();
++    (void)loggedEncodeMode;
+ #endif
+     overlapEncode = ctx.interpolationActive || !serialEncode;
+     if (!overlapEncode) {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::WorkerEncode);
++#endif
+       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+     }
+     encoded = WorkerClock::now();
+@@ -1945,7 +1994,12 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
+   if (overlapEncode) {
+     // Mutex-free: the producer drains and records the next frame in parallel, taking the renderer
+     // mutex per drain, and this phase never takes it.
+-    presentationJobs = encode_sealed_frame(sealedFrame, ctx);
++    {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::WorkerEncode);
++#endif
++      presentationJobs = encode_sealed_frame(sealedFrame, ctx);
++    }
+     publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
+     if (imguiNewFrameOwed) {
+       // Safe only now: every slot has replayed this frame's ImGui draw lists.
+diff --git a/aurora-main/lib/dawn/BackendBinding.cpp b/aurora-main/lib/dawn/BackendBinding.cpp
+index bb8fba4..4342d5d 100644
+--- a/aurora-main/lib/dawn/BackendBinding.cpp
++++ b/aurora-main/lib/dawn/BackendBinding.cpp
+@@ -6,6 +6,12 @@
+ #include <SDL3/SDL_video.h>
+ #endif
+ 
++#if defined(__SWITCH__)
++#include <switch.h>
++
++extern "C" NWindow* switchGetMainWindow();
++#endif
++
+ namespace aurora::webgpu::utils {
+ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL_Window* window);
+ 
+@@ -24,6 +30,13 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Wind
+   desc->hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+   desc->hinstance = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
+   return std::move(desc);
++#elif defined(__SWITCH__)
++  // Horizon's native window is libnx's NWindow, which the Switch EGL implementation accepts
++  // directly. Dawn's OpenGL ES surface path takes it through the opaque native-window descriptor.
++  std::shared_ptr<wgpu::SurfaceSourceAndroidNativeWindow> desc =
++      std::make_shared<wgpu::SurfaceSourceAndroidNativeWindow>();
++  desc->window = switchGetMainWindow();
++  return desc;
+ #elif defined(SDL_PLATFORM_LINUX)
+   const char* driver = SDL_GetCurrentVideoDriver();
+   if (SDL_strcmp(driver, "wayland") == 0) {
+diff --git a/aurora-main/lib/dolphin/gx/GXGeometry.cpp b/aurora-main/lib/dolphin/gx/GXGeometry.cpp
+index b5c3ef0..85a9241 100644
+--- a/aurora-main/lib/dolphin/gx/GXGeometry.cpp
++++ b/aurora-main/lib/dolphin/gx/GXGeometry.cpp
+@@ -479,3 +479,26 @@ extern "C" void AuroraGetVtxFormatRegs(uint32_t fmt, uint32_t out[6]) {
+   out[4] = fmt < 8 ? __gx->vatC[fmt] : 0;
+   out[5] = static_cast<uint32_t>(__gx->nrmType);
+ }
++
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" void AuroraGetVtxShadow(uint32_t fmt, uint32_t out[7]) {
++  AuroraGetVtxFormatRegs(fmt, out);
++  out[6] = static_cast<uint32_t>(__gx->hasNrms) | (static_cast<uint32_t>(__gx->hasBiNrms) << 8);
++}
++
++extern "C" bool AuroraResendVtxShadow(uint32_t fmt, const uint32_t expected[7]) {
++  if (fmt >= GX_MAX_VTXFMT || !aurora::gx::fifo::threaded() || aurora::gx::fifo::in_display_list()) {
++    return false;
++  }
++  uint32_t current[7];
++  AuroraGetVtxShadow(fmt, current);
++  if (std::memcmp(current, expected, sizeof(current)) != 0) {
++    return false;
++  }
++  // The decoded state can differ after a display list. Re-emit VCD and VAT in FIFO order
++  // even when the producer's register shadow already contains the requested state.
++  __gx->dirtyState |= 8 | 0x10;
++  __gx->dirtyVAT |= static_cast<u8>(1u << fmt);
++  return true;
++}
++#endif
+diff --git a/aurora-main/lib/dolphin/pad/pad.cpp b/aurora-main/lib/dolphin/pad/pad.cpp
+index 853c529..606154f 100644
+--- a/aurora-main/lib/dolphin/pad/pad.cpp
++++ b/aurora-main/lib/dolphin/pad/pad.cpp
+@@ -141,7 +141,11 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
+     {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
+     {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
++#if defined(__SWITCH__)
++    {PADEncodeAxisButton(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, false), PAD_TRIGGER_Z},
++#else
+     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
++#endif
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
+     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+     {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_BUTTON_UP},
+diff --git a/aurora-main/lib/gfx/common.cpp b/aurora-main/lib/gfx/common.cpp
+index 885d04f..c79a4df 100644
+--- a/aurora-main/lib/gfx/common.cpp
++++ b/aurora-main/lib/gfx/common.cpp
+@@ -18,6 +18,10 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++
++#if defined(__SWITCH__)
++#include "switch/frame_profile.h"
++#endif
+ #include <cmath>
+ #include <cstdlib>
+ #include <memory>
+@@ -125,6 +129,13 @@ static ByteBuffer g_indices;
+ static ByteBuffer g_storage;
+ static ByteBuffer g_textureUpload;
+ wgpu::Buffer g_vertexBuffer;
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++static wgpu::Texture g_vertexWords;
++static wgpu::Texture g_arrayWords;
++constexpr uint32_t VertexWordRowBytes = VertexWordTextureWidth * sizeof(uint32_t);
++static_assert(VertexBufferSize % VertexWordRowBytes == 0);
++static_assert(StorageBufferSize % VertexWordRowBytes == 0);
++#endif
+ wgpu::Buffer g_uniformBuffer;
+ wgpu::Buffer g_indexBuffer;
+ wgpu::Buffer g_storageBuffer;
+@@ -185,6 +196,9 @@ struct RenderPass {
+   bool resolveNeedsShaderSampling = false;
+   bool resolveLinearSampling = false;
+   bool snapshotColorResolveSource = false;
++#if defined(NSMBW_USE_DEKO3D)
++  bool directColorResolveSource = false;
++#endif
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+   // NSMBW: copies of this pass's resolve target into a region of another texture (add_resolve_patch).
+   struct Patch {
+@@ -643,8 +657,25 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
+   prevPass.resolveNeedsConversion = samplingPlan.needsConversion;
+   prevPass.resolveNeedsShaderSampling = samplingPlan.needsShaderSampling;
+   prevPass.resolveLinearSampling = samplingPlan.usesLinearSampling;
++#if defined(__SWITCH__)
++  // Resolves run after the draw pass and before the following clear on the same encoder.
++  // On Switch GLES, read the EFB directly to avoid synchronizing an extra texture copy.
++  const bool useResolveSnapshot = webgpu::g_backendType != wgpu::BackendType::OpenGLES;
++#else
++  constexpr bool useResolveSnapshot = true;
++#endif
+   prevPass.snapshotColorResolveSource =
+-      !gx::is_depth_format(resolveFormat) && (clearColor || clearAlpha || clearDepth);
++      useResolveSnapshot && !gx::is_depth_format(resolveFormat) && (clearColor || clearAlpha || clearDepth);
++#if defined(NSMBW_USE_DEKO3D)
++  // The copy reads the stored attachment on this encoder before the next pass clears it.
++  // Limit this to the main EFB, with a distinct destination and no persistent texture bake.
++  prevPass.directColorResolveSource =
++      prevPass.snapshotColorResolveSource && !persistentCopy && prevPass.msaaSamples == 1 &&
++      prevPass.copySourceTexture.Get() == webgpu::g_frameBuffer.texture.Get() &&
++      prevPass.copySourceTexture.Get() != prevPass.resolveTarget->texture.Get() &&
++      switch_direct_efb_enabled();
++  prevPass.snapshotColorResolveSource &= !prevPass.directColorResolveSource;
++#endif
+   Vec4<float> uniformSourceRect = sourceRect;
+   float srcW = static_cast<float>(prevPass.targetSize.width);
+   float srcH = static_cast<float>(prevPass.targetSize.height);
+@@ -923,12 +954,27 @@ void initialize() {
+   };
+   createBuffer(g_uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
+                "Shared Uniform Buffer");
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  const auto createWordTexture = [](uint64_t size, const char* label) {
++    const wgpu::TextureDescriptor descriptor{
++        .label = label,
++        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
++        .dimension = wgpu::TextureDimension::e2D,
++        .size = {VertexWordTextureWidth, static_cast<uint32_t>(size / VertexWordRowBytes), 1},
++        .format = wgpu::TextureFormat::R32Uint,
++    };
++    return g_device.CreateTexture(&descriptor);
++  };
++  g_vertexWords = createWordTexture(VertexBufferSize, "Shared Vertex Words");
++  g_arrayWords = createWordTexture(StorageBufferSize, "Shared Array Words");
++#else
+   createBuffer(g_vertexBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, VertexBufferSize,
+                "Shared Vertex Buffer");
+-  createBuffer(g_indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
+-               "Shared Index Buffer");
+   createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
+                "Shared Storage Buffer");
++#endif
++  createBuffer(g_indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
++               "Shared Index Buffer");
+   for (int i = 0; i < g_stagingBuffers.size(); ++i) {
+     const auto label = fmt::format("Staging Buffer {}", i);
+     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
+@@ -944,19 +990,27 @@ void initialize() {
+         wgpu::BindGroupLayoutEntry{
+             .binding = 0,
+             .visibility = wgpu::ShaderStage::Vertex,
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++            .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
++#else
+             .buffer =
+                 wgpu::BufferBindingLayout{
+                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
+                 },
++#endif
+         },
+         // Storage data buffer
+         wgpu::BindGroupLayoutEntry{
+             .binding = 1,
+             .visibility = wgpu::ShaderStage::Vertex,
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++            .texture = {.sampleType = wgpu::TextureSampleType::Uint, .viewDimension = wgpu::TextureViewDimension::e2D},
++#else
+             .buffer =
+                 wgpu::BufferBindingLayout{
+                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
+                 },
++#endif
+         },
+     };
+     const wgpu::BindGroupLayoutDescriptor layoutDesc{
+@@ -965,6 +1019,14 @@ void initialize() {
+         .entries = layoutEntries.data(),
+     };
+     g_staticBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++    const auto vertices = g_vertexWords.CreateView();
++    const auto arrays = g_arrayWords.CreateView();
++    const std::array entries{
++        wgpu::BindGroupEntry{.binding = 0, .textureView = vertices},
++        wgpu::BindGroupEntry{.binding = 1, .textureView = arrays},
++    };
++#else
+     const std::array entries{
+         wgpu::BindGroupEntry{
+             .binding = 0,
+@@ -975,6 +1037,7 @@ void initialize() {
+             .buffer = g_storageBuffer,
+         },
+     };
++#endif
+     const wgpu::BindGroupDescriptor bindGroupDescriptor{
+         .label = "Static bind group",
+         .layout = g_staticBindGroupLayout,
+@@ -1042,6 +1105,10 @@ void shutdown() {
+   g_uniformBuffer = {};
+   g_indexBuffer = {};
+   g_storageBuffer = {};
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  g_vertexWords = {};
++  g_arrayWords = {};
++#endif
+   // Invalidate outstanding callbacks before releasing their buffers.
+   s_mappingState.reset();
+   g_stagingBuffers.fill({});
+@@ -1089,6 +1156,9 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
+   ZoneScoped;
+   {
+     ZoneScopedN("Wait for buffer map");
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::StagingMap, s_mappingState.state() != BufferMapState::Mapped);
++#endif
+     map_staging_buffer();
+     while (true) {
+       const auto mappingState = s_mappingState.state();
+@@ -1222,14 +1292,40 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
+     bufferOffset += size;
+     return writeSize;
+   };
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  const auto writeWords = [&](ByteBuffer& buf, const wgpu::Texture& texture, uint64_t size) {
++    const auto writeSize = buf.size();
++    if (writeSize > 0) {
++      const auto rows = static_cast<uint32_t>((writeSize + VertexWordRowBytes - 1) / VertexWordRowBytes);
++      const wgpu::TexelCopyBufferInfo source{
++          .layout = {.offset = bufferOffset, .bytesPerRow = VertexWordRowBytes, .rowsPerImage = rows},
++          .buffer = g_stagingBuffers[currentStagingBuffer],
++      };
++      const wgpu::TexelCopyTextureInfo destination{.texture = texture};
++      const wgpu::Extent3D extent{VertexWordTextureWidth, rows, 1};
++      cmd.CopyBufferToTexture(&source, &destination, &extent);
++      buf.release();
++    }
++    bufferOffset += size;
++    return writeSize;
++  };
++#endif
+   g_stagingBuffers[currentStagingBuffer].Unmap();
+   s_mappingState.reset();
+   g_stats.drawCallCount = g_drawCallCount;
+   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  g_stats.lastVertSize = writeWords(g_verts, g_vertexWords, VertexBufferSize);
++#else
+   g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
++#endif
+   g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
+   g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  g_stats.lastStorageSize = writeWords(g_storage, g_arrayWords, StorageBufferSize);
++#else
+   g_stats.lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
++#endif
+   flush_deferred_texture_writes();  // the static textures this frame loaded (TextureRef::lazy)
+   if constexpr (UseTextureBuffer) {
+     g_stats.lastTextureUploadSize = g_textureUpload.size();
+@@ -1368,6 +1464,13 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
+   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
+   // interpolation weight, so encode them on the native render and let replay slots sample them.
+   const bool encodeTextureBakes = interpolatedFrame < 0;
++#if defined(__SWITCH__)
++  const bool timeEfbCopies = switch_frame_profiling_enabled();
++#endif
++#if defined(NSMBW_USE_DEKO3D)
++  uint32_t skippedSnapshots = 0;
++  uint32_t retainedSnapshots = 0;
++#endif
+   for (u32 i = 0; i < renderPasses.size(); ++i) {
+     const auto& passInfo = renderPasses[i];
+     if (encodeTextureBakes) {
+@@ -1421,6 +1524,9 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
+     }
+ 
+     if (passInfo.resolveTarget) {
++#if defined(__SWITCH__)
++      const auto copyStart = timeEfbCopies ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++#endif
+       const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
+       wgpu::Texture resolveSourceTexture = passInfo.copySourceTexture;
+       wgpu::TextureView resolveSourceView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView;
+@@ -1504,8 +1610,23 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
+         const wgpu::Extent3D size{.width = patch.width, .height = patch.height, .depthOrArrayLayers = 1};
+         cmd.CopyTextureToTexture(&src, &dst, &size);
+       }
++#if defined(__SWITCH__)
++      if (timeEfbCopies) {
++        const auto elapsed = std::chrono::steady_clock::now() - copyStart;
++        switch_record_efb_encode(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
++#if defined(NSMBW_USE_DEKO3D)
++        skippedSnapshots += passInfo.directColorResolveSource;
++        retainedSnapshots += passInfo.snapshotColorResolveSource;
++#endif
++      }
++#endif
+     }
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  if (skippedSnapshots != 0 || retainedSnapshots != 0) {
++    switch_record_efb_snapshots(skippedSnapshots, retainedSnapshots);
++  }
++#endif
+   if (finalize) {
+     recycle_render_passes(renderPasses);
+   }
+diff --git a/aurora-main/lib/gfx/common.hpp b/aurora-main/lib/gfx/common.hpp
+index 55b1bd5..d93b6f2 100644
+--- a/aurora-main/lib/gfx/common.hpp
++++ b/aurora-main/lib/gfx/common.hpp
+@@ -228,6 +228,9 @@ namespace aurora::gfx {
+ inline constexpr bool UseTextureBuffer = false;
+ inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
+ inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++inline constexpr uint32_t VertexWordTextureWidth = 1024;
++#endif
+ inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
+ inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
+ inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
+diff --git a/aurora-main/lib/gfx/efb_ram_copy.cpp b/aurora-main/lib/gfx/efb_ram_copy.cpp
+index b99acd6..5cd6dca 100644
+--- a/aurora-main/lib/gfx/efb_ram_copy.cpp
++++ b/aurora-main/lib/gfx/efb_ram_copy.cpp
+@@ -5,6 +5,10 @@
+ #include "../internal.hpp"
+ #include "../webgpu/gpu.hpp"
+ 
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
++
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
+@@ -353,20 +357,25 @@ bool complete_downloads() noexcept {
+       std::string message;
+     };
+     const auto result = std::make_shared<MapResult>();
+-    const auto future =
+-        download.buffer.MapAsync(wgpu::MapMode::Read, 0, download.bufferSize, wgpu::CallbackMode::WaitAnyOnly,
+-                                 [result](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+-                                   std::lock_guard lock{result->mutex};
+-                                   result->status = status;
+-                                   if (message.data != nullptr) {
+-                                     size_t length = 0;
+-                                     while (length < 512 && length < message.length && message.data[length] != '\0') {
+-                                       ++length;
+-                                     }
+-                                     result->message.assign(message.data, length);
+-                                   }
+-                                 });
+-    const auto waitStatus = g_instance.WaitAny(future, 5000000000);
++    const auto waitStatus = [&] {
++#if defined(NSMBW_USE_DEKO3D)
++      const SwitchFrameTimer timing(SwitchFramePhase::EfbReadbackWait);
++#endif
++      const auto future =
++          download.buffer.MapAsync(wgpu::MapMode::Read, 0, download.bufferSize, wgpu::CallbackMode::WaitAnyOnly,
++                                    [result](wgpu::MapAsyncStatus status, wgpu::StringView message) {
++                                      std::lock_guard lock{result->mutex};
++                                      result->status = status;
++                                      if (message.data != nullptr) {
++                                        size_t length = 0;
++                                        while (length < 512 && length < message.length && message.data[length] != '\0') {
++                                          ++length;
++                                        }
++                                        result->message.assign(message.data, length);
++                                      }
++                                    });
++      return g_instance.WaitAny(future, 5000000000);
++    }();
+     wgpu::MapAsyncStatus mapStatus;
+     std::string mapMessage;
+     {
+@@ -381,6 +390,9 @@ bool complete_downloads() noexcept {
+       continue;
+     }
+ 
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::EfbReadbackEncode);
++#endif
+     const auto* pixels = static_cast<const uint8_t*>(download.buffer.GetConstMappedRange(0, download.bufferSize));
+     const auto& readbackTexture = download.copy.nativeTexture ? download.copy.nativeTexture : download.copy.texture;
+     const auto order = texture_pixel_order(readbackTexture);
+diff --git a/aurora-main/lib/gfx/pipeline_cache.cpp b/aurora-main/lib/gfx/pipeline_cache.cpp
+index 78dc538..3fa1ef1 100644
+--- a/aurora-main/lib/gfx/pipeline_cache.cpp
++++ b/aurora-main/lib/gfx/pipeline_cache.cpp
+@@ -9,6 +9,10 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+ #include <condition_variable>
+ #include <cstdlib>
+ #include <cstring>
+@@ -736,7 +740,11 @@ static bool prepare_pipeline_cache_db() {
+     return false;
+   }
+ 
++#if defined(NSMBW_USE_DEKO3D)
++  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=NORMAL;");
++#else
+   ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++#endif
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
+     pipeline_cache_abort();
+@@ -1184,6 +1192,9 @@ void initialize_pipeline_cache() {
+   g_pipelineThreadEnd = false;
+   g_activeBackgroundPipelineWorkers = 0;
+   g_prewarmHeld = webgpu::g_holdPrewarmUntilShown;
++#if defined(NSMBW_USE_DEKO3D)
++  g_prewarmHeld = webgpu::g_backendType == wgpu::BackendType::Deko3d;
++#endif
+   if (const char* env = std::getenv("AURORA_PREWARM"); env != nullptr) {
+     if (std::strcmp(env, "hold") == 0) {
+       g_prewarmHeld = true;
+@@ -1325,6 +1336,9 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline,
+       // A persistent resolve is the last chance to produce its texture, so timing out here corrupts it
+       // permanently. Only a pass marked requireReadyPipelines takes this path.
+     }
++#if defined(NSMBW_USE_DEKO3D)
++    const SwitchFrameTimer timing(SwitchFramePhase::PipelineWait);
++#endif
+     g_pipelineCv.wait(lock, finished);
+   }
+   const auto it = g_pipelines.find(ref);
+diff --git a/aurora-main/lib/gx/command_processor.cpp b/aurora-main/lib/gx/command_processor.cpp
+index a693525..faffd43 100644
+--- a/aurora-main/lib/gx/command_processor.cpp
++++ b/aurora-main/lib/gx/command_processor.cpp
+@@ -1,3 +1,7 @@
++#if defined(__SWITCH__)
++#include "switch/frame_profile.h"
++#endif
++
+ #include <absl/container/flat_hash_set.h>
+ #include <array>
+ #include "command_processor.hpp"
+@@ -518,8 +522,12 @@ thread_local int t_statDepth = 0;  // only the outermost of nested process()/raw
+ static bool StatTiming() {
+ #if defined(_WIN32)
+   return true;
++#else
++#if defined(__SWITCH__)
++  static const bool on = switch_frame_profiling_enabled();
+ #else
+   static const bool on = std::getenv("NSMBW_LOG_FPS") != nullptr;
++#endif
+   return on;
+ #endif
+ }
+diff --git a/aurora-main/lib/gx/fifo.cpp b/aurora-main/lib/gx/fifo.cpp
+index c96d0cf..2462e22 100644
+--- a/aurora-main/lib/gx/fifo.cpp
++++ b/aurora-main/lib/gx/fifo.cpp
+@@ -12,8 +12,11 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <deque>
++#include <memory>
+ #include <mutex>
++#include <new>
+ #include <thread>
++#include <utility>
+ #include <vector>
+ 
+ #include "tracy/Tracy.hpp"
+@@ -25,6 +28,9 @@
+ #include <windows.h>
+ #elif defined(__linux__)
+ #include <pthread.h>
++#elif defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#include "switch/worker_affinity.h"
+ #endif
+ 
+ namespace aurora::gx::fifo {
+@@ -116,13 +122,26 @@ static void process_buffer(const uint8_t* data, uint32_t size) {
+ namespace {
+ constexpr uint32_t kHandOffBytes = 16 * 1024;  // queue a buffer once this much has built up
+ 
++#if defined(NSMBW_USE_DEKO3D)
++struct FifoBatch {
++  struct Deleter {
++    void operator()(uint8_t* bytes) const noexcept { std::free(bytes); }
++  };
++  std::unique_ptr<uint8_t, Deleter> data;
++  uint32_t size = 0;
++  uint32_t capacity = 0;
++};
++#else
++using FifoBatch = std::vector<uint8_t>;
++#endif
++
+ struct GxThread {
+   std::thread thread;
+   std::mutex mutex;
+   std::condition_variable work;
+   std::condition_variable idle;
+-  std::deque<std::vector<uint8_t>> jobs;
+-  std::vector<std::vector<uint8_t>> spare;
++  std::deque<FifoBatch> jobs;
++  std::vector<FifoBatch> spare;
+   bool busy = false;
+ };
+ 
+@@ -130,6 +149,9 @@ GxThread& gx_thread() {
+   static GxThread* t = [] {
+     auto* state = new GxThread();
+     state->thread = std::thread([state] {
++#if defined(NSMBW_USE_DEKO3D)
++      Log.info("Switch GX worker affinity: {}", SwitchPinGraphicsWorker(1) ? "CPU 1" : "system default");
++#endif
+       // Named for profilers (NSMBW_PROFILE_THREAD=GXThread). SetThreadDescription is looked up,
+       // as Windows 10 1607 brought it.
+ #if defined(_WIN32)
+@@ -142,7 +164,7 @@ GxThread& gx_thread() {
+       pthread_setname_np(pthread_self(), "GXThread");
+ #endif
+       for (;;) {
+-        std::vector<uint8_t> job;
++        FifoBatch job;
+         {
+           std::unique_lock lock(state->mutex);
+           state->work.wait(lock, [state] { return !state->jobs.empty(); });
+@@ -150,12 +172,22 @@ GxThread& gx_thread() {
+           state->jobs.pop_front();
+           state->busy = true;
+         }
++#if defined(NSMBW_USE_DEKO3D)
++        process_buffer(job.data.get(), job.size);
++#else
+         process_buffer(job.data(), static_cast<uint32_t>(job.size()));
++#endif
+         {
+           std::lock_guard lock(state->mutex);
+           state->busy = false;
++#if defined(NSMBW_USE_DEKO3D)
++          if (state->spare.size() < 8) {
++            state->spare.push_back(std::move(job));
++          }
++#else
+           job.clear();
+           state->spare.push_back(std::move(job));
++#endif
+           if (state->jobs.empty()) {
+             state->idle.notify_all();
+           }
+@@ -163,7 +195,11 @@ GxThread& gx_thread() {
+       }
+     });
+     state->thread.detach();
++#if defined(NSMBW_USE_DEKO3D)
++    Log.info("GX thread started (Switch), recycling FIFO buffers");
++#else
+     Log.info("GX thread started ({} hardware threads)", std::thread::hardware_concurrency());
++#endif
+     return state;
+   }();
+   return *t;
+@@ -173,8 +209,34 @@ void hand_off() {
+   if (detail::sBufferSize == 0) {
+     return;
+   }
++#if defined(NSMBW_USE_DEKO3D)
++  const SwitchFrameTimer timing(SwitchFramePhase::GxHandoff);
++  if (switch_frame_profiling_enabled()) {
++    switch_record_gx_handoff();
++  }
++#endif
+   auto& t = gx_thread();
+-  std::vector<uint8_t> job;
++#if defined(NSMBW_USE_DEKO3D)
++  {
++    std::lock_guard lock(t.mutex);
++    FifoBatch replacement;
++    if (!t.spare.empty()) {
++      replacement = std::move(t.spare.back());
++      t.spare.pop_back();
++    } else {
++      replacement.data.reset(static_cast<uint8_t*>(std::malloc(kHandOffBytes)));
++      if (!replacement.data) throw std::bad_alloc{};
++      replacement.capacity = kHandOffBytes;
++    }
++    // Transfer the complete command buffer. The worker owns it until decoding
++    // finishes, and the producer resumes writing into the spare allocation.
++    auto& job = t.jobs.emplace_back();
++    job.data.reset(std::exchange(detail::sBufferData, replacement.data.release()));
++    job.size = std::exchange(detail::sBufferSize, 0);
++    job.capacity = std::exchange(detail::sBufferCapacity, replacement.capacity);
++  }
++#else
++  FifoBatch job;
+   {
+     std::lock_guard lock(t.mutex);
+     if (!t.spare.empty()) {
+@@ -188,6 +250,7 @@ void hand_off() {
+     std::lock_guard lock(t.mutex);
+     t.jobs.push_back(std::move(job));
+   }
++#endif
+   t.work.notify_one();
+ }
+ } // namespace
+@@ -203,7 +266,14 @@ bool threaded_for(wgpu::BackendType backend) {
+     if (value != nullptr && value[0] != '\0') {
+       return value[0] == '1';
+     }
++#if defined(NSMBW_USE_DEKO3D)
++    // devkitA64's std::thread::hardware_concurrency() reports zero on Horizon.
++    u64 cores = 0;
++    return R_SUCCEEDED(svcGetInfo(&cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) &&
++           (cores & (cores - 1)) != 0;
++#else
+     return std::thread::hardware_concurrency() >= 2;
++#endif
+   }();
+   // Never on OpenGL (ES): its context belongs to one thread, so that renderer runs single-threaded.
+   // Off until the renderer is up, too; turning on later is safe, as nothing is left queued then.
+@@ -248,7 +318,14 @@ void flush_async() {
+     drain();
+     return;
+   }
+-  if (detail::sBufferSize >= kHandOffBytes) {
++#if defined(NSMBW_USE_DEKO3D)
++  // Horizon has a dedicated GX core. Hand off earlier so it can decode the batch
++  // while the game still produces commands, ahead of the next state read or EFB copy.
++  static const uint32_t batchBytes = switch_gx_batch_bytes();
++#else
++  constexpr uint32_t batchBytes = kHandOffBytes;
++#endif
++  if (detail::sBufferSize >= batchBytes) {
+     hand_off();
+   }
+ }
+@@ -275,6 +352,9 @@ void sync_if_threaded() {
+     if (t.jobs.empty() && !t.busy) {
+       lock.unlock();  // only this thread queues jobs, so the GX thread stays idle meanwhile
+       if (detail::sBufferSize != 0) {
++#if defined(NSMBW_USE_DEKO3D)
++        const SwitchFrameTimer timing(SwitchFramePhase::GxInlineDecode);
++#endif
+         process_buffer(detail::sBufferData, detail::sBufferSize);
+         detail::sBufferSize = 0;
+       }
+@@ -283,6 +363,9 @@ void sync_if_threaded() {
+   }
+   hand_off();
+   std::unique_lock lock(t.mutex);
++#if defined(NSMBW_USE_DEKO3D)
++  const SwitchFrameTimer timing(SwitchFramePhase::GxSyncWait, !t.jobs.empty() || t.busy);
++#endif
+   t.idle.wait(lock, [&t] { return t.jobs.empty() && !t.busy; });
+ }
+ 
+@@ -307,3 +390,9 @@ void clear_buffer() {
+ }
+ 
+ } // namespace aurora::gx::fifo
++
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" bool AuroraGxFifoThreaded() {
++  return aurora::gx::fifo::threaded();
++}
++#endif
+diff --git a/aurora-main/lib/gx/shader.cpp b/aurora-main/lib/gx/shader.cpp
+index b9b48c6..9522b2d 100644
+--- a/aurora-main/lib/gx/shader.cpp
++++ b/aurora-main/lib/gx/shader.cpp
+@@ -1015,10 +1015,22 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
+   // Storage reads for vertex pulling. The GPU compatibility path guards each with a bounds check
+   // that valid data never trips; its presence keeps Adreno's optimizer from the transformation that
+   // scrambles skinned vertices (upstream aurora #202).
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  std::string uniformPre = fmt::format(R"(
++fn load_word(source: u32, word_idx: u32) -> u32 {{
++    let coords = vec2i(i32(word_idx % {0}u), i32(word_idx / {0}u));
++    if (source == 0u) {{
++        return textureLoad(vbuf, coords, 0).r;
++    }}
++    return textureLoad(abuf, coords, 0).r;
++}}
++)", gfx::VertexWordTextureWidth);
++#else
+   std::string uniformPre = webgpu::g_safeVertexFetch
+       ? "\nfn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {\n"
+         "  if (word_idx < arrayLength(p)) {\n    return p[word_idx];\n  }\n  return 0u;\n}\n"
+       : "\nfn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {\n  return p[word_idx];\n}\n";
++#endif
+   std::string uniBufAttrs;
+   std::string texBindings;
+   std::string vtxOutAttrs;
+@@ -2229,6 +2241,19 @@ fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
+                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentReturnType,
+                                         fragmentReturn);
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++  // Keep the same attribute decoders while reading words through integer texture fetches.
++  const auto replace = [&](std::string_view from, std::string_view to) {
++    for (size_t pos = 0; (pos = shaderSource.find(from, pos)) != std::string::npos; pos += to.size()) {
++      shaderSource.replace(pos, from.size(), to);
++    }
++  };
++  replace("var<storage, read> vbuf: array<u32>;", "var vbuf: texture_2d<u32>;");
++  replace("var<storage, read> abuf: array<u32>;", "var abuf: texture_2d<u32>;");
++  replace("ptr<storage, array<u32>>", "u32");
++  replace("&vbuf", "0u");
++  replace("&abuf", "1u");
++#endif
+   if (webgpu::g_shaderDebug != 0) {
+     apply_shader_debug(shaderSource, hash);
+   }
+diff --git a/aurora-main/lib/webgpu/gpu.cpp b/aurora-main/lib/webgpu/gpu.cpp
+index 0849f91..1f6320f 100644
+--- a/aurora-main/lib/webgpu/gpu.cpp
++++ b/aurora-main/lib/webgpu/gpu.cpp
+@@ -683,6 +683,10 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
+     return wgpu::BackendType::OpenGL;
+   case BACKEND_OPENGLES:
+     return wgpu::BackendType::OpenGLES;
++#ifdef NSMBW_USE_DEKO3D
++  case BACKEND_DEKO3D:
++    return wgpu::BackendType::Deko3d;
++#endif
+   default:
+     return wgpu::BackendType::Null;
+   }
+@@ -962,12 +966,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowSoftware) {
+           "not safe on this device.");
+     }
+ #ifdef WEBGPU_DAWN
+-    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
+-        .isolationKey = nullptr,
+-        .loadDataFunction = load_from_cache,
+-        .storeDataFunction = store_to_cache,
+-        .functionUserdata = nullptr,
+-    });
++#if defined(NSMBW_USE_DEKO3D)
++    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.isolationKey = nullptr});
++    cacheDescriptor.loadDataFunction = load_from_cache;
++    cacheDescriptor.storeDataFunction = store_to_cache;
++#elif defined(__SWITCH__)
++    // The port skips Dawn's on-disk pipeline cache: this Dawn version's cache callbacks take a
++    // typed userdata parameter that its own C++ helpers do not yet instantiate for this toolchain.
++    // The effect is only a slower first frame after each launch.
++    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.isolationKey = nullptr});
++    (void)cacheDescriptor;
++#else
++    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.isolationKey = nullptr});
++    cacheDescriptor.SetDawnLoadCacheDataCallback(
++        +[](const void* key, size_t keySize, void* value, size_t valueSize) {
++          return load_from_cache(key, keySize, value, valueSize, nullptr);
++        });
++    cacheDescriptor.SetDawnStoreCacheDataCallback(
++        +[](const void* key, size_t keySize, const void* value, size_t valueSize) {
++          return store_to_cache(key, keySize, value, valueSize, nullptr);
++        });
++#endif
+ 
+     std::vector<const char*> enableToggles{
+     /* clang-format off */
+@@ -1017,8 +1036,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowSoftware) {
+       }
+       Log.info("Graphics debug flags: {}", joined);
+     }
++#if defined(__SWITCH__) && !defined(NSMBW_USE_DEKO3D)
++    constexpr bool kDawnCacheAvailable = false;
++#else
++    constexpr bool kDawnCacheAvailable = true;
++#endif
+     const wgpu::DawnTogglesDescriptor togglesDescriptor({
+-        .nextInChain = gfx_flag("nocache") ? nullptr : &cacheDescriptor,
++        .nextInChain = (gfx_flag("nocache") || !kDawnCacheAvailable) ? nullptr : &cacheDescriptor,
+         .enabledToggleCount = enableToggles.size(),
+         .enabledToggles = enableToggles.data(),
+         .disabledToggleCount = disableToggles.size(),
+diff --git a/aurora-main/lib/webgpu/gpu_cache.cpp b/aurora-main/lib/webgpu/gpu_cache.cpp
+index 7b0fa1f..c8113b4 100644
+--- a/aurora-main/lib/webgpu/gpu_cache.cpp
++++ b/aurora-main/lib/webgpu/gpu_cache.cpp
+@@ -135,6 +135,12 @@ static void prune_stale_rows() {
+   }
+ }
+ 
++#if defined(NSMBW_USE_DEKO3D)
++static constexpr const char* CachePragmas = "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=NORMAL;";
++#else
++static constexpr const char* CachePragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
++#endif
++
+ static bool cache_init_core() {
+   Log.debug("SQLite version {}", sqlite3_libversion());
+ 
+@@ -147,8 +153,7 @@ static bool cache_init_core() {
+     return false;
+   }
+ 
+-  // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
+-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++  ret = sqlite::exec(db, CachePragmas);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
+     return false;
+@@ -177,7 +182,7 @@ static bool cache_init_core() {
+       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
+       return false;
+     }
+-    ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++    ret = sqlite::exec(db, CachePragmas);
+     if (ret != SQLITE_OK) {
+       Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
+       return false;
+diff --git a/runtime/include/abi_bridge.h b/runtime/include/abi_bridge.h
+index 5631d64..c1aab37 100644
+--- a/runtime/include/abi_bridge.h
++++ b/runtime/include/abi_bridge.h
+@@ -1,4 +1,6 @@
+ #pragma once
++
++extern "C" void switch_trace_mark(const char*);
+ #include "memory.h"
+ #include "ppc_runtime.h"
+ #include "system_bridge.h"
+diff --git a/runtime/include/controller_button_names.h b/runtime/include/controller_button_names.h
+index 3d58f30..7a08984 100644
+--- a/runtime/include/controller_button_names.h
++++ b/runtime/include/controller_button_names.h
+@@ -113,6 +113,72 @@ inline const NativeButtonItem& NativeButtonForValue(uint32_t nativeButton) {
+     return it == kNativeButtons.end() ? *FindNativeButton("unmapped") : *it;
+ }
+ 
++// Which family's names the runtime prints for a physical button. Auto keeps the positional
++// label that names both families ("South (A / Cross)"); the others print one family only, so
++// a player can see their own pad's names even when detection guesses wrong.
++enum class Layout : int32_t { Auto = 0, PlayStation = 1, Xbox = 2, Nintendo = 3 };
++
++inline Layout& LayoutStorage() {
++    static Layout value = Layout::Auto;
++    return value;
++}
++
++inline Layout GetLayout() {
++    return LayoutStorage();
++}
++
++inline void SetLayout(Layout value) {
++    LayoutStorage() = value;
++}
++
++// The label to draw for a physical input under the current layout.
++inline std::string LabelFor(const NativeButtonItem& item) {
++    const Layout layout = GetLayout();
++    if (layout == Layout::Auto) {
++        return item.label;
++    }
++    struct Entry {
++        const char* key;
++        const char* playstation;
++        const char* xbox;
++        const char* nintendo;
++    };
++    static constexpr Entry kEntries[] = {
++        {"south", "Cross (\u2715)", "A", "B"},
++        {"east", "Circle (\u25CB)", "B", "A"},
++        {"west", "Square (\u25A1)", "X", "Y"},
++        {"north", "Triangle (\u25B3)", "Y", "X"},
++        {"back", "Create", "View", "\u2212"},
++        {"start", "Options", "Menu", "+"},
++        {"guide", "PS", "Guide", "Home"},
++        {"left_shoulder", "L1", "LB", "L"},
++        {"right_shoulder", "R1", "RB", "R"},
++        {"left_trigger", "L2", "LT", "ZL"},
++        {"right_trigger", "R2", "RT", "ZR"},
++        {"left_stick", "L3", "L3", "L3"},
++        {"right_stick", "R3", "R3", "R3"},
++        {"misc1", "Share", "Share", "Mic"},
++        {"touchpad", "Touchpad", "Touchpad", "Touchpad"},
++    };
++    const std::string_view key = item.configName;
++    for (const auto& entry : kEntries) {
++        if (key != entry.key) {
++            continue;
++        }
++        switch (layout) {
++        case Layout::PlayStation: return entry.playstation;
++        case Layout::Xbox: return entry.xbox;
++        case Layout::Nintendo: return entry.nintendo;
++        default: break;
++        }
++    }
++    return item.label;
++}
++
++inline std::string LabelForValue(uint32_t nativeButton) {
++    return LabelFor(NativeButtonForValue(nativeButton));
++}
++
+ // "right_trigger" or "right_trigger@30" -> that physical input (an axis keeps its threshold, in percent).
+ // PAD_NATIVE_BUTTON_INVALID when the name is unknown, empty or "unmapped": the action's default.
+ inline uint32_t ParseNativeBinding(std::string_view token) {
+diff --git a/runtime/include/guest_flat_memory.h b/runtime/include/guest_flat_memory.h
+index a0e3757..9b668f7 100644
+--- a/runtime/include/guest_flat_memory.h
++++ b/runtime/include/guest_flat_memory.h
+@@ -43,7 +43,16 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0040'0000'0000ull;
+ #error "guest_flat_memory.h has no fixed flat guest base chosen for this architecture"
+ #endif
+ 
++// Horizon cannot place an allocation at a chosen address, so its arena sits wherever
++// aligned_alloc() puts it and the flat base has to be read at runtime. Everywhere else the base is a
++// link-time constant and the compiler folds it into the address computation.
++uint8_t* Base();
++
++#if defined(__SWITCH__)
++#define MKW_FLAT_GUEST_BASE (GuestFlat::Base())
++#else
+ #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
++#endif
+ 
+ enum class Backing {
+     Owned,
+@@ -80,7 +89,10 @@ bool IsActive();
+ #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
+ #endif
+ 
+-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
++#if defined(__SWITCH__)
++// Horizon cannot resume a faulting guest access. Always use the checked path.
++inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
++#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+ inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
+ #else
+ // Const, set from the page size while the library initializes: a store through a flat guest pointer
+diff --git a/runtime/include/isa/ppc_isa_config.h b/runtime/include/isa/ppc_isa_config.h
+index b062184..459a690 100644
+--- a/runtime/include/isa/ppc_isa_config.h
++++ b/runtime/include/isa/ppc_isa_config.h
+@@ -35,4 +35,15 @@ inline constexpr bool MkwStateFreeAbiEnabled(uint32_t) noexcept
+ #define MKW_PPC_COLD __attribute__((cold))
+ 
+ 
++#if defined(__clang__)
+ using MkwStateFreeResult2 = uint64_t __attribute__((ext_vector_type(2)));
++#else
++// Two 64-bit lanes, 16 bytes — the same layout GCC gives a vector, but as an aggregate so the
++// generated `return {a, b};` is valid. GCC only accepts brace-initialisation of a vector through
++// its own constructors, not as a return value.
++struct MkwStateFreeResult2 {
++    uint64_t v[2];
++    uint64_t operator[](int index) const { return v[index]; }
++    uint64_t& operator[](int index) { return v[index]; }
++};
++#endif
+diff --git a/runtime/include/isa/ppc_isa_int.h b/runtime/include/isa/ppc_isa_int.h
+index a9e93cc..eddea76 100644
+--- a/runtime/include/isa/ppc_isa_int.h
++++ b/runtime/include/isa/ppc_isa_int.h
+@@ -11,7 +11,13 @@
+ 
+ inline uint32_t PpcRotl32Inline(uint32_t value, uint32_t shift)
+ {
++#if defined(__clang__)
+     return __builtin_rotateleft32(value, shift);
++#else
++    // PPC rotate-left: the shift is taken modulo 32, and a rotate by 0 must not shift by 32.
++    const uint32_t amount = shift & 31u;
++    return amount == 0 ? value : (value << amount) | (value >> (32u - amount));
++#endif
+ }
+ 
+ extern "C" uint32_t OSSystemCall();
+diff --git a/runtime/include/memory_access.h b/runtime/include/memory_access.h
+index 7ac535d..1cccfb1 100644
+--- a/runtime/include/memory_access.h
++++ b/runtime/include/memory_access.h
+@@ -232,11 +232,20 @@ MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffs
+     const uint32_t guestStart = base + static_cast<uint32_t>(minOffset);
+     if (length == 0 || length > kPageSize || guestStart > UINT32_MAX - (length - 1)) return nullptr;
+     if (GuestFlat::RequiresCheckedAccess()) {
+-        // A host page can cover multiple independently-special Wii pages.
+-        // Returning null keeps resolved accesses on the checked Memory::*
+-        // path, which materializes deferred reads and applies write policy.
+-        (void)needsWrite;
++#if defined(__SWITCH__)
++        // The translator ends this pointer's lifetime at a guest call, suspend, or
++        // other memory epoch boundary. Give it a host pointer only when one coarse
++        // page proves that the entire range can use the same RAM and access policy.
++        const uint32_t page = guestStart >> kPageShift;
++        if ((guestStart & kPageMask) + length > kPageSize) return nullptr;
++        const uintptr_t bias = needsWrite ? g_fullWritablePageBias[page] :
++                                           g_fullReadablePageBias[page];
++        if (bias == 0 || (needsRead && g_fullReadablePageBias[page] == 0)) return nullptr;
++        return reinterpret_cast<uint8_t*>(bias - 1u + guestStart);
++#else
++        // Larger host pages can cover several independently protected Wii pages.
+         return nullptr;
++#endif
+     }
+     if (needsWrite &&
+         (FlatWriteNeedsPolicy(guestStart) || FlatWriteNeedsPolicy(guestStart + (length - 1))))
+@@ -375,12 +384,10 @@ MKW_MEMORY_FORCE_INLINE bool TryWriteGuestScalar(uint32_t address, T value) {
+     // its 4 KiB sub-pages are plain data; MKW's THP buffers share such a page with .text, which
+     // used to force ~15% of total CPU through the cold path. The sparse sub-page tier below
+     // keeps those stores native while the exact 4 KiB executable guards stay authoritative.
+-    if (address > UINT32_MAX - static_cast<uint32_t>(sizeof(T) - 1u)) [[unlikely]]
++    // A scalar contained in one coarse page cannot wrap the address space.
++    if ((address & kPageMask) > kPageSize - sizeof(T)) [[unlikely]]
+         return false;
+     const uint32_t coarsePage = address >> kPageShift;
+-    const uint32_t endAddress = address + static_cast<uint32_t>(sizeof(T) - 1u);
+-    if ((endAddress >> kPageShift) != coarsePage) [[unlikely]]
+-        return false;
+     const uintptr_t encodedBias = g_fullWritablePageBias[coarsePage];
+     uint8_t* ptr = nullptr;
+     if (encodedBias != 0) {
+diff --git a/runtime/include/nand_path.h b/runtime/include/nand_path.h
+index 3e17a75..1965079 100644
+--- a/runtime/include/nand_path.h
++++ b/runtime/include/nand_path.h
+@@ -6,6 +6,7 @@
+ #include "system_bridge.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstdio>
+@@ -130,6 +131,14 @@ inline std::filesystem::path ManagedNandRootPath() {
+ }
+ 
+ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
++#if defined(__SWITCH__)
++    if (switch_has_bundled_game()) {
++        const std::filesystem::path bundled = NSMBW_SWITCH_BUNDLED_NAND_SEED;
++        if (ExistingDirectory(bundled / "shared2" / "wc24")) {
++            return bundled;
++        }
++    }
++#endif
+     if (auto executableDirectory = RuntimeConfigFile::ExecutableDirectory()) {
+         const auto adjacent = *executableDirectory / "wii_bootstrap";
+         if (ExistingDirectory(adjacent / "shared2" / "wc24")) {
+@@ -166,6 +175,35 @@ inline bool CopyBootstrapFile(const std::filesystem::path& sourceRoot,
+     if (ec) {
+         return false;
+     }
++#if defined(__SWITCH__)
++    if (sourceRoot == NSMBW_SWITCH_BUNDLED_NAND_SEED) {
++        // libstdc++'s copy_file path cannot copy from libnx's read-only RomFS.
++        // Publish each seed only after the complete stream has been written.
++        std::ifstream input(source, std::ios::binary);
++        if (!input) {
++            ec = std::make_error_code(std::errc::no_such_file_or_directory);
++            return false;
++        }
++        auto temporary = destination;
++        temporary += ".seeding";
++        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
++        std::array<char, 4096> bytes;
++        while (output && (input.read(bytes.data(), bytes.size()) || input.gcount() != 0)) {
++            output.write(bytes.data(), input.gcount());
++        }
++        output.close();
++        if (output && input.eof() && !input.bad()) {
++            std::filesystem::rename(temporary, destination, ec);
++        } else {
++            ec = std::make_error_code(std::errc::io_error);
++        }
++        if (ec) {
++            std::error_code ignored;
++            std::filesystem::remove(temporary, ignored);
++        }
++        return !ec;
++    }
++#endif
+     std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
+     return !ec;
+ }
+diff --git a/runtime/include/netplay_session.h b/runtime/include/netplay_session.h
+index 80382d2..5be1969 100644
+--- a/runtime/include/netplay_session.h
++++ b/runtime/include/netplay_session.h
+@@ -43,6 +43,7 @@ struct Status {
+     uint8_t localSlot = 0;
+     uint8_t playerCount = 0;
+     uint32_t frame = 0;
++    uint32_t inputDelay = 0;   // frames of input delay this session runs with
+     int waitingForSlot = -1;   // slot whose input the game is waiting for, -1 when not waiting
+     uint32_t waitedMs = 0;     // how long the current wait has lasted
+     uint32_t desyncFrame = 0;  // first frame two devices disagreed on, 0 = none
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index 719d7e7..6f7b713 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -21,6 +21,9 @@
+ #include <toml.hpp>
+ #include "platform/host_platform.h"
+ #include "runtime_product.h"
++#if defined(__SWITCH__)
++#include "switch/data_root.h"
++#endif
+ #ifdef _WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+@@ -121,7 +124,13 @@ struct RuntimeUserConfig {
+     // shake, each one physical input name ("left_trigger", "right_stick_left@30"). Unset = the built-in input.
+     std::array<std::optional<std::string>, 3> remoteActions;
+     std::optional<bool> rumbleEnabled;
++    // Which family's button names the runtime prints: 0 auto (both, e.g. "South (A / Cross)"),
++    // 1 PlayStation, 2 Xbox, 3 Nintendo. [controller] button_layout.
++    std::optional<int32_t> buttonLayout;
+     std::optional<int32_t> muteHotkey;
++    // Netplay: frames of input delay to ask for, 0 or unset = sized from the measured round trip and
++    // jitter when a session starts. [netplay] input_delay; see InputDelayFrames in netplay_lobby.cpp.
++    std::optional<int32_t> netplayInputDelay;
+     std::map<std::string, std::string> controllerExpressions;
+     // NSMBW: [keyboard] action = "comma-separated SDL scancode names" (keybinds.h).
+     std::map<std::string, std::string> keyboardBindings;
+@@ -132,6 +141,8 @@ struct RuntimeUserConfig {
+     std::map<std::string, std::vector<std::vector<std::string>>> controllerCombos;
+ };
+ 
++extern "C" void switch_trace_mark(const char*);
++
+ namespace RuntimeConfigFile {
+ 
+ // Narrow path strings are UTF-8 everywhere in the runtime; string() and the
+@@ -212,6 +223,8 @@ inline bool IsSupportedGraphicsApi(std::string_view value) {
+     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
+ #elif defined(_WIN32)
+     static constexpr std::array<std::string_view, 4> values{"auto", "d3d12", "vulkan", "d3d11"};
++#elif defined(__SWITCH__)
++    static constexpr std::array<std::string_view, 2> values{"auto", "deko3d"};
+ #endif
+     return std::find(values.begin(), values.end(), value) != values.end();
+ }
+@@ -395,7 +408,11 @@ inline std::filesystem::path BaseApplicationDataDirectory() {
+     if (const auto& portableRoot = PortableRootDirectory()) {
+         return *portableRoot / kPortableUserDataDirectoryName;
+     }
+-#ifdef _WIN32
++#if defined(__SWITCH__)
++    // Horizon mounts the SD card at sdmc:. Everything the port owns lives under one directory, so
++    // Config.toml, UserData and the extracted game sit beside the .nro.
++    return std::filesystem::path(NSMBW_SWITCH_DATA_ROOT);
++#elif defined(_WIN32)
+     static const std::optional<std::filesystem::path> documents = []() -> std::optional<std::filesystem::path> {
+         PWSTR documentsPath = nullptr;
+         if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_CREATE, nullptr, &documentsPath)) ||
+@@ -598,6 +615,12 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+     }
+ 
+     config.rumbleEnabled = FindConfigValue<bool>(document, "controller", "rumble");
++    if (auto value = FindConfigInt(document, "controller", "button_layout"); value && *value >= 0 && *value <= 3) {
++        config.buttonLayout = *value;
++    }
++    if (auto value = FindConfigInt(document, "netplay", "input_delay"); value && *value >= 0 && *value <= 20) {
++        config.netplayInputDelay = *value;
++    }
+     if (auto value = FindConfigInt(document, "audio", "mute_key")) {
+         config.muteHotkey = *value;
+     }
+@@ -758,9 +781,17 @@ inline RuntimeUserConfig ParseConfig(std::istream& input, std::string sourceName
+ }
+ 
+ inline RuntimeUserConfig LoadConfigFile() {
++    switch_trace_mark("CFG ensure");
+     EnsureConfigFile();
++    switch_trace_mark("CFG ensured");
+     std::ifstream file(ResolveConfigPath(), std::ios::binary);
+-    return file ? ParseConfig(file, PathToUtf8(ResolveConfigPath())) : RuntimeUserConfig{};
++    switch_trace_mark(file ? "CFG opened" : "CFG open failed");
++    if (!file) {
++        return RuntimeUserConfig{};
++    }
++    RuntimeUserConfig parsed = ParseConfig(file, PathToUtf8(ResolveConfigPath()));
++    switch_trace_mark("CFG parsed");
++    return parsed;
+ }
+ 
+ inline const RuntimeUserConfig& Get() {
+@@ -1185,6 +1216,24 @@ inline bool SetRumbleEnabled(bool value) {
+     return WriteSetting("controller", "rumble", value ? "true" : "false");
+ }
+ 
++inline int32_t ButtonLayout(int32_t fallback = 0) {
++    return Get().buttonLayout.value_or(fallback);
++}
++
++inline bool SetButtonLayout(int32_t value) {
++    Mutable().buttonLayout = value;
++    return WriteSetting("controller", "button_layout", std::to_string(value));
++}
++
++inline int32_t NetplayInputDelay(int32_t fallback = 0) {
++    return Get().netplayInputDelay.value_or(fallback);
++}
++
++inline bool SetNetplayInputDelay(int32_t value) {
++    Mutable().netplayInputDelay = value;
++    return WriteSetting("netplay", "input_delay", std::to_string(value));
++}
++
+ inline int32_t MuteHotkey(int32_t fallback) {
+     return Get().muteHotkey.value_or(fallback);
+ }
+@@ -1499,6 +1548,11 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
+ 
+ // The extracted DATA directory. Empty when nothing is configured.
+ inline std::filesystem::path ResolvedDvdRoot() {
++#if defined(__SWITCH__)
++    if (switch_has_bundled_game()) {
++        return NSMBW_SWITCH_BUNDLED_GAME_ROOT;
++    }
++#endif
+     const std::string configured = DvdRoot();
+     return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
+ }
+diff --git a/runtime/include/system_bridge.h b/runtime/include/system_bridge.h
+index ae06b02..d1cc12b 100644
+--- a/runtime/include/system_bridge.h
++++ b/runtime/include/system_bridge.h
+@@ -19,6 +19,9 @@
+ #if defined(_WIN32)
+ using MkwJmpBuf = jmp_buf;
+ #define MKW_SETJMP(buf) setjmp(buf)
++#elif defined(__SWITCH__)
++using MkwJmpBuf = jmp_buf;
++#define MKW_SETJMP(buf) setjmp(buf)
+ #else
+ using MkwJmpBuf = sigjmp_buf;
+ #define MKW_SETJMP(buf) sigsetjmp(buf, 1)
+diff --git a/runtime/include/wii_es_crypto.h b/runtime/include/wii_es_crypto.h
+index 0c515b5..020dbab 100644
+--- a/runtime/include/wii_es_crypto.h
++++ b/runtime/include/wii_es_crypto.h
+@@ -143,6 +143,25 @@ inline CryptoEcdsa::PrivateKey MakePrivateKey(const uint8_t* key) {
+     return privateKey;
+ }
+ 
++#if defined(__SWITCH__)
++// Crypto++'s AutoSeededRandomPool needs an OS random source, which it only compiles where
++// OS_RNG_AVAILABLE is set - not on Horizon. ECDSA signing still needs randomness, so this provides
++// a self-seeded generator with the same interface.
++class SwitchRandomPool : public CryptoPP::RandomNumberGenerator {
++public:
++    void GenerateBlock(CryptoPP::byte* output, size_t size) override {
++        static uint64_t state = 0x9E3779B97F4A7C15ull;
++        for (size_t i = 0; i < size; ++i) {
++            state = state * 6364136223846793005ull + 1442695040888963407ull;
++            output[i] = static_cast<CryptoPP::byte>(state >> 33);
++        }
++    }
++};
++using EsRandomPool = SwitchRandomPool;
++#else
++using EsRandomPool = CryptoPP::AutoSeededRandomPool;
++#endif
++
+ inline EcSignature SignMessage(const uint8_t* key, const uint8_t* data, size_t size) {
+     const CryptoEcdsa::PrivateKey privateKey = MakePrivateKey(key);
+     const CryptoEcdsa::Signer signer(privateKey);
+@@ -150,7 +169,7 @@ inline EcSignature SignMessage(const uint8_t* key, const uint8_t* data, size_t s
+         throw std::runtime_error("Crypto++ returned an unexpected sect233r1 signature size");
+     }
+ 
+-    thread_local CryptoPP::AutoSeededRandomPool random;
++    thread_local EsRandomPool random;
+     EcSignature signature{};
+     const size_t written = signer.SignMessage(random, data, size, signature.data());
+     if (written != signature.size()) {
+diff --git a/runtime/src/abi_bridge.cpp b/runtime/src/abi_bridge.cpp
+index 161ae89..5d705f9 100644
+--- a/runtime/src/abi_bridge.cpp
++++ b/runtime/src/abi_bridge.cpp
+@@ -374,11 +374,12 @@ const TranslatedFunctionInfo* TranslatedFunctionRegistry::FindByAddressPtrSlow(u
+     }
+ 
+     std::lock_guard<std::mutex> lock(RegistryMutex());
+-    auto it = AddressIndex().find(address);
++    const auto it = AddressIndex().find(address);
+     if (it != AddressIndex().end()) {
+         return &Registry()[it->second];
+     }
+-    for (auto& entry : Registry()) {
++
++    for (const auto& entry : Registry()) {
+         if (entry.address == address) {
+             return &entry;
+         }
+diff --git a/runtime/src/game_folder.cpp b/runtime/src/game_folder.cpp
+index 06d045a..f69026f 100644
+--- a/runtime/src/game_folder.cpp
++++ b/runtime/src/game_folder.cpp
+@@ -595,6 +595,9 @@ bool EnsureConfigured() {
+ #endif
+     const fs::path configured = Find(RuntimeConfigFile::ResolvedDvdRoot());
+     if (!configured.empty() && Problem(configured).empty()) {
++#if defined(__SWITCH__)
++        RT_LOGF(RT_TAG_RUNTIME, "game folder: %s\n", RuntimeConfigFile::PathToUtf8(configured).c_str());
++#endif
+         return true;
+     }
+ #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+diff --git a/runtime/src/guest_flat_memory.cpp b/runtime/src/guest_flat_memory.cpp
+index f09ca2e..cb993eb 100644
+--- a/runtime/src/guest_flat_memory.cpp
++++ b/runtime/src/guest_flat_memory.cpp
+@@ -31,7 +31,26 @@
+ #include <cerrno>
+ #include <cstring>
+ #include <fcntl.h>
++#if defined(__SWITCH__)
++// Horizon has no <sys/mman.h>. The arena is a plain heap block and every access is bounds-checked,
++// so the POSIX mapping calls below are never reached; these shims exist to compile the code paths
++// that stay shared with the other platforms.
++#include <cstdlib>
++#define PROT_NONE 0
++#define PROT_READ 1
++#define PROT_WRITE 2
++#define MAP_PRIVATE 0
++#define MAP_ANONYMOUS 0
++#define MAP_NORESERVE 0
++#define MAP_SHARED 0
++#define MAP_FIXED 0
++#define MAP_FAILED (reinterpret_cast<void*>(-1))
++static inline void* mmap(void*, size_t, int, int, int, off_t) { return MAP_FAILED; }
++static inline int munmap(void*, size_t) { return 0; }
++static inline int mprotect(void*, size_t, int) { return 0; }
++#else
+ #include <sys/mman.h>
++#endif
+ #include <unistd.h>
+ #if defined(__ANDROID__)
+ #include <android/sharedmem.h>
+@@ -41,6 +60,8 @@
+ #define MFD_CLOEXEC 0x0001U
+ #endif
+ 
++extern "C" void switch_trace_mark(const char*);
++
+ namespace {
+ // An anonymous shared-memory fd that can be mapped more than once. bionic's memfd_create wrapper is
+ // Android 11+, but the kernel call is older (Linux 3.17): Android 8-10 make the syscall directly, and
+@@ -58,6 +79,10 @@ int CreateSharedMemory(const char* name, size_t size, bool& sized) {
+         sized = true;
+     }
+     return ashmem;
++#elif defined(__SWITCH__)
++    (void)name;
++    (void)size;
++    return -1;  // no shared-memory objects on Horizon; the checked arena path does not need them
+ #else
+     (void)size;
+     return memfd_create(name, MFD_CLOEXEC);
+@@ -67,7 +92,7 @@ int CreateSharedMemory(const char* name, size_t size, bool& sized) {
+ #endif
+ 
+ namespace GuestFlat {
+-#if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
++#if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE) && !defined(__SWITCH__)
+ // A host page larger than a Wii page can't carry per-Wii-page protection (see the header).
+ extern const bool g_requiresCheckedAccess = [] {
+     const long size = sysconf(_SC_PAGESIZE);
+@@ -295,6 +320,29 @@ void EnsureReservation() {
+             "The flat guest reservation did not land on the fixed base the translated code was "
+             "compiled against.");
+     }
++#elif defined(__SWITCH__)
++    // Horizon has no mmap and no reservation API. One contiguous block is taken and presented as the
++    // flat base for the range the game addresses: MEM1 at 0x80000000, MEM2 at 0x90000000. MMIO is
++    // diverted by the checked accessors, so the 0xCC000000 register window needs no storage.
++    constexpr uintptr_t kLowestGuest = 0x80000000u;
++    constexpr size_t kSwitchArena = 0x20000000u;  // 512 MB
++    switch_trace_mark("GF: allocating 512 MB arena");
++    void* block = std::aligned_alloc(0x1000, kSwitchArena);
++    switch_trace_mark(block != nullptr ? "GF: arena allocated" : "GF: arena allocation FAILED");
++    if (block == nullptr) {
++        throw std::runtime_error("Unable to allocate the flat guest arena on Horizon (512 MB).");
++    }
++    std::memset(block, 0, kSwitchArena);
++    switch_trace_mark("GF: arena zeroed");
++    g_base = static_cast<uint8_t*>(block) - kLowestGuest;
++    {
++        char line[160];
++        std::snprintf(line, sizeof line, "GF: block=%p end=%p g_base=%p",
++                      block, static_cast<void*>(static_cast<uint8_t*>(block) + kSwitchArena),
++                      static_cast<void*>(g_base));
++        switch_trace_mark(line);
++    }
++    return;
+ #else
+     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
+ 
+@@ -331,7 +379,9 @@ void EnsureReservation() {
+     }
+ #endif
+ 
++#if !defined(__SWITCH__)
+     g_base = static_cast<uint8_t*>(reserved);
++#endif
+ }
+ 
+ #if defined(_WIN32)
+@@ -566,6 +616,37 @@ void Initialize(const std::vector<RegionRequest>& regions) {
+ 
+     EnsureReservation();
+ 
++#if defined(__SWITCH__)
++    // Horizon cannot create aliased virtual mappings. Point each physical and
++    // uncached Wii window at its cached bytes in the one 512 MiB arena instead.
++    // The locked cache is a separate allocation outside that guest RAM window.
++    static uint8_t* lockedCache = nullptr;
++    for (const auto& region : regions) {
++        if (region.size == 0) continue;
++        uint8_t* hostView = nullptr;
++        if (region.backing == Backing::Mem1) {
++            hostView = g_base + 0x80000000ull + (region.base & 0x01FFFFFFu);
++        } else if (region.backing == Backing::Mem2) {
++            hostView = g_base + 0x90000000ull + (region.base & 0x0FFFFFFFu);
++        } else if (region.base >= 0x80000000u && region.base < 0xA0000000u &&
++                   static_cast<uint64_t>(region.base) + region.size <= 0xA0000000ull) {
++            hostView = g_base + region.base;
++        } else if (region.base == 0xE0000000u) {
++            if (lockedCache == nullptr) {
++                lockedCache = static_cast<uint8_t*>(std::calloc(1, region.size));
++            }
++            hostView = lockedCache;
++        }
++        if (hostView == nullptr) {
++            throw std::runtime_error("Switch guest region has no backing allocation");
++        }
++        MappedRegions().push_back(MappedRegion{region.base, region.size, region.size, 0, hostView});
++    }
++    g_activeRegions = regions;
++    g_initialized = true;
++    return;
++#endif
++
+     // Size every section from the highest byte any of its regions reaches.
+     std::unordered_map<SectionKey, uint64_t, SectionKeyHash> sizes;
+     for (const auto& region : regions) {
+@@ -652,6 +733,10 @@ void Initialize(const std::vector<RegionRequest>& regions) {
+               << " regions, " << Sections().size() << " backing stores)" << std::endl;
+ }
+ 
++uint8_t* Base() {
++    return g_base;
++}
++
+ uint8_t* HostPointer(uint32_t guestAddress) {
+     if (!g_initialized) return nullptr;
+     for (const auto& region : MappedRegions()) {
+diff --git a/runtime/src/hle/audio/ax_mix.cpp b/runtime/src/hle/audio/ax_mix.cpp
+index a476cd0..f60e327 100644
+--- a/runtime/src/hle/audio/ax_mix.cpp
++++ b/runtime/src/hle/audio/ax_mix.cpp
+@@ -42,6 +42,20 @@ std::atomic<uint32_t> g_mixes{0};
+ std::atomic<int> g_mixCpu{-1};
+ 
+ std::filesystem::path FindDspCoefficientRom() {
++#if defined(__SWITCH__)
++    if (switch_has_bundled_game()) {
++        const std::filesystem::path bundled = "romfs:/dsp_coef.bin";
++        if (std::filesystem::is_regular_file(bundled)) {
++            return bundled;
++        }
++    }
++    {
++        const auto onSdCard = RuntimeConfigFile::ApplicationDataDirectory() / "dsp_coef.bin";
++        if (std::filesystem::is_regular_file(onSdCard)) {
++            return onSdCard;
++        }
++    }
++#endif
+     if (const auto executableDirectory = RuntimeConfigFile::ExecutableDirectory()) {
+         const auto adjacent = *executableDirectory / "dsp_coef.bin";
+         if (std::filesystem::is_regular_file(adjacent)) {
+diff --git a/runtime/src/hle/gx/gx_fifo.cpp b/runtime/src/hle/gx/gx_fifo.cpp
+index b581bf4..571de39 100644
+--- a/runtime/src/hle/gx/gx_fifo.cpp
++++ b/runtime/src/hle/gx/gx_fifo.cpp
+@@ -41,9 +41,33 @@ static void ApplyAuroraVtxStateForRawBegin(GXVtxFmt fmt) {
+     // publishes GX_VA_NBT after GX_VA_NRM, which makes aurora's SETVAT fall-through clobber the
+     // NRM VAT with the default. Raw-FIFO geometry renders correctly with it; do not "fix" without
+     // an in-race A/B run.
+-    PublishAuroraVtxState(fmt, AuroraVtxPublishOptions{/*includeNbt=*/true,
+-                                                       /*fmtLoopFirst=*/0,
+-                                                       /*fmtLoopLast=*/25});
++    constexpr AuroraVtxPublishOptions options{/*includeNbt=*/true, /*fmtLoopFirst=*/0, /*fmtLoopLast=*/25};
++#if defined(NSMBW_USE_DEKO3D)
++    if (fmt < GX_MAX_VTXFMT) {
++        struct Published {
++            bool valid = false;
++            uint32_t generation = 0;
++            uint32_t shadow[7]{};
++        };
++        static Published published[GX_MAX_VTXFMT];
++        auto& last = published[fmt];
++        const uint32_t generation = g_hleGxState.vtxStateGeneration;
++        if (last.valid && last.generation == generation && AuroraResendVtxShadow(fmt, last.shadow)) {
++            static const bool logged = [] {
++                std::fputs("Switch GX vertex-state reuse active\n", stderr);
++                return true;
++            }();
++            (void)logged;
++            return;
++        }
++        PublishAuroraVtxState(fmt, options);
++        AuroraGetVtxShadow(fmt, last.shadow);
++        last.generation = generation;
++        last.valid = true;
++        return;
++    }
++#endif
++    PublishAuroraVtxState(fmt, options);
+ }
+ 
+ // There is deliberately no indexed-aurora path here. Immediate-mode indexed
+@@ -56,7 +80,7 @@ static uint32_t GetDirectAttrByteSizeForFifo(GXAttr attr, const VtxAttrFmt& fmt)
+     return DirectAttrByteSize(attr, fmt, /*matrixAttrIsOneByte=*/true, /*fallbackComps=*/1u);
+ }
+ 
+-static bool TryGetRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
++static bool ComputeRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
+     vertexSize = 0;
+     if (fmt >= GX_MAX_VTXFMT) {
+         return false;
+@@ -83,6 +107,30 @@ static bool TryGetRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
+     return vertexSize != 0;
+ }
+ 
++static bool TryGetRawDirectFifoVertexSize(GXVtxFmt fmt, uint32_t& vertexSize) {
++#if defined(NSMBW_USE_DEKO3D)
++    if (fmt < GX_MAX_VTXFMT) {
++        struct VertexSize {
++            bool valid = false;
++            bool direct = false;
++            uint32_t generation = 0;
++            uint32_t size = 0;
++        };
++        static VertexSize sizes[GX_MAX_VTXFMT];
++        auto& entry = sizes[fmt];
++        const uint32_t generation = g_hleGxState.vtxStateGeneration;
++        if (!entry.valid || entry.generation != generation) {
++            entry.direct = ComputeRawDirectFifoVertexSize(fmt, entry.size);
++            entry.generation = generation;
++            entry.valid = true;
++        }
++        vertexSize = entry.size;
++        return entry.direct;
++    }
++#endif
++    return ComputeRawDirectFifoVertexSize(fmt, vertexSize);
++}
++
+ static bool TrySubmitRawDirectFifoDraw(const uint8_t* packet, uint32_t packetBytes, GXPrimitive prim,
+                                        GXVtxFmt vtxFmt, uint16_t vtxCount) {
+     if (packet == nullptr || packetBytes == 0 || vtxCount == 0) {
+@@ -418,6 +466,26 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
+     }
+     if (g_hleGxState.rawBegin) {
+         const uint32_t count = sizeBytes == 0 ? 4u : std::min<uint32_t>(sizeBytes, 4u);
++#if defined(NSMBW_USE_DEKO3D)
++        auto& state = g_hleGxState;
++        if (count <= state.rawExpected - state.rawFilled) {
++            uint8_t* dst = state.rawPacket.data() + state.rawFilled;
++            if (count == 4) {
++                BigEndian::Write32(dst, val);
++            } else if (count == 2) {
++                BigEndian::Write16(dst, static_cast<uint16_t>(val));
++            } else {
++                for (uint32_t i = 0; i < count; ++i) {
++                    dst[i] = static_cast<uint8_t>(val >> (8u * (count - 1u - i)));
++                }
++            }
++            state.rawFilled += count;
++            if (state.rawFilled == state.rawExpected) {
++                RawBeginFinish();
++            }
++            return;
++        }
++#endif
+         uint8_t bytes[4];
+         for (uint32_t i = 0; i < count; ++i) {
+             bytes[i] = static_cast<uint8_t>(val >> (8u * (count - 1u - i)));
+diff --git a/runtime/src/hle/gx/gx_stream_common.h b/runtime/src/hle/gx/gx_stream_common.h
+index 7866173..1eed979 100644
+--- a/runtime/src/hle/gx/gx_stream_common.h
++++ b/runtime/src/hle/gx/gx_stream_common.h
+@@ -14,6 +14,10 @@
+ // Header-inline throughout: the shipped clang/llvm-mingw build has no LTO across runtime shards,
+ // so a non-inline hot helper becomes a real call on the per-vertex path.
+ 
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" bool AuroraGxFifoThreaded();
++#endif
++
+ namespace GxCmd {
+ 
+ constexpr uint8_t GX_NOP_CMD         = 0x00;
+@@ -313,15 +317,19 @@ inline bool PackIndexedAttrData(const uint8_t* srcBase, uint32_t stride, uint32_
+     return true;
+ }
+ 
+-// NSMBW_GX_THREAD=1: the GX thread decodes a list after the game has moved on, and the matrix
++// The GX thread decodes a list after the game has moved on, and the matrix
+ // arrays an indexed load reads are rewritten as it goes (model after model), so aurora is handed a
+ // copy taken now, which is what decoding at call time used to read. The copies live in a ring that
+ // waits for the GX thread before it wraps.
+ inline const uint8_t* SnapshotForGxThread(const uint8_t* data, uint32_t size) {
++#if defined(NSMBW_USE_DEKO3D)
++    const bool threaded = AuroraGxFifoThreaded();
++#else
+     static const bool threaded = [] {
+         const char* value = std::getenv("NSMBW_GX_THREAD");
+         return value != nullptr && value[0] == '1';
+     }();
++#endif
+     if (!threaded || data == nullptr || size == 0) {
+         return data;
+     }
+diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
+index 7ebfb9d..9311b4b 100644
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -5,6 +5,9 @@
+ #include "fiber_manager.h"
+ #include "guest_interrupt_context.h"
+ #include "runtime_log.h"
++#if defined(NSMBW_USE_DEKO3D)
++#include "switch/frame_profile.h"
++#endif
+ 
+ #include <dolphin/gx/GXAurora.h>
+ 
+@@ -302,18 +305,31 @@ void ServiceDeferredTimingDuringGxWork() {
+ }
+ 
+ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
++#if defined(NSMBW_USE_DEKO3D)
++    static thread_local uint32_t calls = 0;
++    const SwitchFrameTimer sampledBegin(SwitchFramePhase::GxBeginSample, (++calls & 63u) == 0);
++#endif
+     if(IsDisplayListActive()){
+         WriteDisplayListData((u8)(t|vf), 1);
+         WriteDisplayListData((u16)nv, 2);
+         return;
+     }
+     ServiceDeferredTimingDuringGxWork();
++#if !defined(NSMBW_USE_DEKO3D)
+     ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
++#endif
+     g_hleGxState.currentVtxFmt=(GXVtxFmt)vf; g_hleGxState.currentPrim=(GXPrimitive)t;
+     g_hleGxState.vertsRemaining=nv; g_hleGxState.inBegin=true; g_hleGxState.auroraBeginCalled=false;
+     g_hleGxState.fifoReadOffset = 0;
+     g_hleGxState.fifoByteCount=0; g_hleGxState.ResetVertex();
++#if defined(NSMBW_USE_DEKO3D)
++    // Buffered draws publish the complete vertex state when they are submitted.
++    if (!HleTryBeginRaw(static_cast<GXPrimitive>(t), static_cast<GXVtxFmt>(vf), static_cast<uint16_t>(nv))) {
++        ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
++    }
++#else
+     HleTryBeginRaw(static_cast<GXPrimitive>(t), static_cast<GXVtxFmt>(vf), static_cast<uint16_t>(nv));
++#endif
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801c5570, GX__Begin_8016f0f0, (uint32_t t, uint32_t vf, uint32_t nv), (t, vf, nv));
+ 
+diff --git a/runtime/src/hle/os/os_thread.cpp b/runtime/src/hle/os/os_thread.cpp
+index 040fc78..9a87fea 100644
+--- a/runtime/src/hle/os/os_thread.cpp
++++ b/runtime/src/hle/os/os_thread.cpp
+@@ -563,6 +563,10 @@ extern "C" void OSSuspendThread_HLE_801aa6a8(CpuContext* ctx)
+         return;
+     }
+ 
++    // An HLE boundary must never let a host exception unwind into guest code: the guest has no
++    // handler for it, so it becomes std::terminate and takes the process down. The interrupts calls
++    // sit outside the inner try, hence this outer guard.
++    try {
+     const int32_t irqState = OS__DisableInterrupts_801a65ac();
+ 
+     try {
+@@ -604,9 +608,19 @@ extern "C" void OSSuspendThread_HLE_801aa6a8(CpuContext* ctx)
+     } catch (const ::Memory::AccessViolation& e) {
+         LogMemoryError(RT_TAG_OS, "OSSuspendThread", e);
+         cpu->gpr[3] = 0;
++    } catch (const std::exception& e) {
++        // An HLE boundary must never let a host exception unwind into guest code: the guest has no
++        // handler for it, so it becomes std::terminate and takes the process down. Suspending is a
++        // scheduling hint, so report and continue.
++        RT_LOGF(RT_TAG_OS, "OSSuspendThread: host exception '%s'; continuing\n", e.what());
++        cpu->gpr[3] = 0;
+     }
+ 
+     OS__RestoreInterrupts_801a65d4(irqState);
++    } catch (const std::exception& e) {
++        RT_LOGF(RT_TAG_OS, "OSSuspendThread: host exception '%s'; continuing\n", e.what());
++        cpu->gpr[3] = 0;
++    }
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801B5B00, OSSuspendThread_HLE_801aa6a8, (CpuContext* ctx), (ctx));
+ 
+diff --git a/runtime/src/hle/storage/dvd.cpp b/runtime/src/hle/storage/dvd.cpp
+index f598eee..dddb582 100644
+--- a/runtime/src/hle/storage/dvd.cpp
++++ b/runtime/src/hle/storage/dvd.cpp
+@@ -21,6 +21,11 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
++#elif defined(__SWITCH__)
++#include <switch.h>
++#include <array>
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
+ #elif defined(__ANDROID__)
+ #include <fcntl.h>
+ #include <sys/resource.h>
+@@ -128,7 +133,95 @@ FileBytes CachedFile(const fs::path& path) {
+     return it != g_readCache.end() ? it->second : nullptr;
+ }
+ 
+-#if defined(__ANDROID__)
++#if defined(__SWITCH__)
++struct SwitchDiscFile {
++    fs::path::string_type path;
++    FsFile file{};
++    uint64_t size = 0;
++    uint64_t lastUse = 0;
++
++    ~SwitchDiscFile() { Close(); }
++
++    void Close() {
++        if (lastUse != 0) {
++            fsFileClose(&file);
++            lastUse = 0;
++        }
++    }
++};
++
++bool TryReadSwitchDiscFile(const fs::path& path, uint64_t offset, uint32_t length,
++                           std::vector<uint8_t>& destination, bool& wholeFile) {
++    static std::mutex mutex;
++    static std::array<SwitchDiscFile, 16> files;
++    static uint64_t clock = 0;
++    static bool loggedHit = false;
++    std::lock_guard lock(mutex);
++
++    auto entry = std::find_if(files.begin(), files.end(), [&](const SwitchDiscFile& file) {
++        return file.lastUse != 0 && file.path == path.native();
++    });
++    const bool cacheHit = entry != files.end();
++    if (!cacheHit) {
++        entry = std::min_element(files.begin(), files.end(), [](const auto& a, const auto& b) {
++            return a.lastUse < b.lastUse;
++        });
++        char nativePath[FS_MAX_PATH];
++        FsFileSystem* device = nullptr;
++        if (fsdevTranslatePath(path.c_str(), &device, nativePath) != 0 || !device) {
++            return false;
++        }
++        entry->Close();
++        entry->path = path.native();
++        if (R_FAILED(fsFsOpenFile(device, nativePath, FsOpenMode_Read, &entry->file))) {
++            return false;
++        }
++        entry->lastUse = ++clock;
++        s64 size = 0;
++        if (R_FAILED(fsFileGetSize(&entry->file, &size)) || size < 0) {
++            entry->Close();
++            return false;
++        }
++        entry->size = static_cast<uint64_t>(size);
++    }
++    if (offset >= entry->size || length > entry->size - offset) {
++        entry->Close();
++        return false;
++    }
++
++    // The caller's buffer receives bytes only after a complete read.
++    std::vector<uint8_t> staged(length);
++    u64 received = 0;
++    if (length != 0 &&
++        (R_FAILED(fsFileRead(&entry->file, static_cast<s64>(offset), staged.data(),
++                             length, FsReadOption_None, &received)) || received != length)) {
++        entry->Close();
++        return false;
++    }
++    entry->lastUse = ++clock;
++    destination = std::move(staged);
++    wholeFile = offset == 0 && length == entry->size;
++    if (cacheHit && !loggedHit) {
++        RT_LOGF(RT_TAG_DVD, "Switch DVD file cache active\n");
++        loggedHit = true;
++    }
++    return true;
++}
++
++void CacheSmallSwitchDiscFile(const fs::path& path, const std::vector<uint8_t>& bytes) {
++    constexpr size_t kMaxFileBytes = 128 * 1024;
++    constexpr size_t kMaxCacheBytes = 8 * 1024 * 1024;
++    if (bytes.empty() || bytes.size() > kMaxFileBytes) return;
++
++    // Charge metadata as well as data so very small files have a bounded cost.
++    const size_t cost = bytes.size() + path.native().size() + 256;
++    static size_t used = 0;
++    std::lock_guard lock(g_readCacheMutex);
++    if (cost > kMaxCacheBytes - used || g_readCache.contains(path.native())) return;
++    g_readCache.emplace(path.native(), std::make_shared<const std::vector<uint8_t>>(bytes));
++    used += cost;
++}
++#elif defined(__ANDROID__)
+ // Files the game has read, kept open (with their sizes), so the next read of one skips the open.
+ struct OpenFile {
+     int fd = -1;
+@@ -200,6 +293,10 @@ bool ReadHostFile(const fs::path& path, uint64_t offset, uint32_t length, std::v
+     const auto start = std::chrono::steady_clock::now();
+     bool ok = false;
+     if (const FileBytes bytes = CachedFile(path)) {
++#if defined(__SWITCH__)
++        static std::once_flag cachedReadLogged;
++        std::call_once(cachedReadLogged, [] { RT_LOGF(RT_TAG_DVD, "Switch DVD RAM cache active\n"); });
++#endif
+         failure = DvdReadContract::HostReadFailure::None;
+         if (offset >= bytes->size()) {
+             failure = DvdReadContract::HostReadFailure::BadOffset;
+@@ -211,16 +308,32 @@ bool ReadHostFile(const fs::path& path, uint64_t offset, uint32_t length, std::v
+             ok = true;
+         }
+     } else {
+-#if defined(__ANDROID__)
++#if defined(__SWITCH__)
++        failure = DvdReadContract::HostReadFailure::None;
++        bool wholeFile = false;
++        ok = TryReadSwitchDiscFile(path, offset, length, destination, wholeFile);
++        if (ok && wholeFile) CacheSmallSwitchDiscFile(path, destination);
++        if (!ok) ok = DvdReadContract::ReadExact(path, offset, length, destination, failure);
++#elif defined(__ANDROID__)
+         ok = ReadWithOpenFile(path, offset, length, destination, failure);
+ #else
+         ok = DvdReadContract::ReadExact(path, offset, length, destination, failure);
+ #endif
+     }
+-    g_dvdReadNanos.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+-                                                       std::chrono::steady_clock::now() - start)
+-                                                       .count()),
+-                             std::memory_order_relaxed);
++    const auto elapsed = std::chrono::steady_clock::now() - start;
++    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
++    g_dvdReadNanos.fetch_add(static_cast<uint64_t>(nanos), std::memory_order_relaxed);
++#if defined(__SWITCH__)
++    if (elapsed >= std::chrono::milliseconds(8) && switch_frame_profiling_enabled()) {
++        static std::atomic<unsigned> slowReads{0};
++        if (slowReads.fetch_add(1, std::memory_order_relaxed) < 96) {
++            const auto name = path.filename().string();
++            switch_frame_logf("[dvd] slow read %.2f ms, %u bytes at %llu, %s\n",
++                              nanos / 1e6, length, static_cast<unsigned long long>(offset),
++                              name.c_str());
++        }
++    }
++#endif
+     g_dvdReads.fetch_add(1, std::memory_order_relaxed);
+     return ok;
+ }
+@@ -716,10 +829,19 @@ static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix
+             return;
+         }
+ 
++#if defined(__SWITCH__)
++        // Iterator entries already descend from root. Keep the sdmc: device prefix
++        // out of libstdc++'s host absolute-path and canonicalization routines.
++        const fs::path relative = entry.path().lexically_relative(root);
++        if (relative.empty()) {
++            return;
++        }
++#else
+         const fs::path relative = fs::relative(entry.path(), root, entryEc);
+         if (entryEc) {
+             return;
+         }
++#endif
+ 
+         std::string prefix = virtualPrefix.empty() ? "/" : virtualPrefix;
+         if (prefix.back() != '/' && prefix.back() != '\\') {
+@@ -1111,6 +1233,16 @@ extern "C" void DVDInit_8015EA1C()
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801CAD30, DVDInit_8015EA1C, (), ());
+ 
++// 0x801D0CF0 -> DVDCheckDiskBca
++// The BCA lives in the disc's lead-in, which no host file extraction carries, and the translated
++// body spins on a DI completion flag that nothing sets (NSMBW polls it forever after NW4R's EF
++// init). Answer the way Dolphin does without a .bca file: no BCA on this disc.
++extern "C" int32_t DVDCheckDiskBca_801D0CF0()
++{
++    return 0;
++}
++PPC_NATIVE_OVERRIDE(801D0CF0, DVDCheckDiskBca_801D0CF0, int32_t, (), ());
++
+ // FST-only DVD functions run translated so mods can override them safely.
+ 
+ // 0x801CAB20 -> DVDReadPrio
+diff --git a/runtime/src/hle/storage/nand_api.cpp b/runtime/src/hle/storage/nand_api.cpp
+index 6765a4b..d2b681d 100644
+--- a/runtime/src/hle/storage/nand_api.cpp
++++ b/runtime/src/hle/storage/nand_api.cpp
+@@ -170,10 +170,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
+         } else {
+             const std::filesystem::path tempPath = SafeTempPathFor(hostPath);
+             if (DiscardStaleSafeTemp(tempPath)) {
+-                std::error_code ec;
+-                std::filesystem::copy_file(hostPath, tempPath,
+-                                           std::filesystem::copy_options::overwrite_existing, ec);
+-                if (ec) {
++                if (const auto ec = SeedNandShadow(hostPath, tempPath)) {
+                     LogNandWarning("NANDOpen", "WARNING: could not seed shadow '%s' (%s), writing in place",
+                                    HostPathText(tempPath).c_str(), ec.message().c_str());
+                     NandRemove(tempPath);
+diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
+index 4964634..4631c14 100644
+--- a/runtime/src/hle/storage/nand_async.cpp
++++ b/runtime/src/hle/storage/nand_async.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "nand_internal.h"
+ 
++#include <cerrno>
++
+ // Guest callback dispatch: host NAND work completes synchronously, so an "async" call just
+ // queues its guest completion callback here and an HLE pump dispatches it later.
+ 
+@@ -236,7 +238,7 @@ PPC_NATIVE_OVERRIDE(801DAEC0, NANDPrivateGetTypeAsync_HLE, int32_t,
+ 
+ // NANDSafeOpen/NANDSafeClose crash-safe file replacement, mirroring console semantics (nandSafeOpen
+ // @ 0x8019CB80, nandSafeClose @ 0x8019CF30): write modes copy the original to a same-volume scratch
+-// file, and safeClose commits it via fflush -> _commit/fsync -> MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH).
++// file, and safeClose flushes it before publishing it over the original.
+ 
+ static const char kNandSafeTempSuffix[] = ".nandsafe.tmp";
+ 
+@@ -246,6 +248,46 @@ std::filesystem::path SafeTempPathFor(const std::filesystem::path& hostPath) {
+     return tempPath;
+ }
+ 
++std::error_code SeedNandShadow(const std::filesystem::path& source,
++                               const std::filesystem::path& scratch) {
++#ifndef __SWITCH__
++    std::error_code error;
++    std::filesystem::copy_file(source, scratch, std::filesystem::copy_options::overwrite_existing, error);
++    return error;
++#else
++    // Horizon's SD mount supports byte I/O, but the standard library's copy_file
++    // also uses file metadata operations that the mount does not implement.
++    FILE* input = NandFopen(source, "rb");
++    if (!input) {
++        return {errno, std::generic_category()};
++    }
++    FILE* output = NandFopen(scratch, "wb");
++    if (!output) {
++        const std::error_code error(errno, std::generic_category());
++        std::fclose(input);
++        return error;
++    }
++
++    std::error_code error;
++    char buffer[4096];
++    size_t bytesRead;
++    while ((bytesRead = std::fread(buffer, 1, sizeof(buffer), input)) != 0) {
++        if (std::fwrite(buffer, 1, bytesRead, output) != bytesRead) {
++            error = {errno, std::generic_category()};
++            break;
++        }
++    }
++    if (!error && std::ferror(input)) {
++        error = {errno, std::generic_category()};
++    }
++    if (std::fclose(output) != 0 && !error) {
++        error = {errno, std::generic_category()};
++    }
++    std::fclose(input);
++    return error;
++#endif
++}
++
+ // Push the CRT buffer out and then force the OS to put it on the platter, so the data is
+ // durable before the rename that publishes it.
+ static bool FlushFileToDisk(FILE* file) {
+@@ -270,10 +312,48 @@ static bool FlushFileToDisk(FILE* file) {
+ #endif
+ }
+ 
+-// Replace `targetPath` with `tempPath` in one step. Either the old or the new contents
+-// survive a crash; there is no window where the target is truncated or partial.
+-static bool AtomicReplaceHostFile(const char* who, const std::filesystem::path& tempPath,
+-                                  const std::filesystem::path& targetPath) {
++#ifdef __SWITCH__
++static std::mutex g_switchNandPublishMutex;
++
++static std::filesystem::path NandBackupPath(std::filesystem::path targetPath) {
++    targetPath += ".nandsafe.bak";
++    return targetPath;
++}
++
++// Called with g_switchNandPublishMutex held. If publishing was interrupted,
++// the final name either still needs its original contents or already has the
++// complete new file. Keep the backup until one of those states is confirmed.
++static std::error_code RecoverNandBackup(const std::filesystem::path& targetPath,
++                                         const std::filesystem::path& backupPath) {
++    std::error_code error;
++    if (!std::filesystem::exists(backupPath, error) || error) {
++        return error;
++    }
++    const bool targetExists = std::filesystem::exists(targetPath, error);
++    if (error) {
++        return error;
++    }
++    if (targetExists) {
++        std::filesystem::remove(backupPath, error);
++    } else {
++        std::filesystem::rename(backupPath, targetPath, error);
++    }
++    return error;
++}
++
++bool RecoverSwitchNandFile(const std::filesystem::path& targetPath) {
++    std::lock_guard<std::mutex> lock(g_switchNandPublishMutex);
++    if (const auto error = RecoverNandBackup(targetPath, NandBackupPath(targetPath))) {
++        LogNandError("nand-shadow", "FAILED to recover '%s': %s",
++                     HostPathText(targetPath).c_str(), error.message().c_str());
++        return false;
++    }
++    return true;
++}
++#endif
++
++static bool ReplaceHostFile(const char* who, const std::filesystem::path& tempPath,
++                            const std::filesystem::path& targetPath) {
+ #ifdef _WIN32
+     if (MoveFileExW(tempPath.c_str(), targetPath.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+@@ -283,6 +363,38 @@ static bool AtomicReplaceHostFile(const char* who, const std::filesystem::path&
+             HostPathText(tempPath).c_str(), HostPathText(targetPath).c_str(),
+             static_cast<unsigned long>(GetLastError()));
+     return false;
++#elif defined(__SWITCH__)
++    // Horizon does not rename over an existing destination. Set the original
++    // aside first so an interrupted publish can restore it on the next access.
++    std::lock_guard<std::mutex> lock(g_switchNandPublishMutex);
++    const auto backupPath = NandBackupPath(targetPath);
++    auto error = RecoverNandBackup(targetPath, backupPath);
++    if (!error) {
++        std::filesystem::rename(targetPath, backupPath, error);
++    }
++    if (error) {
++        LogNandError(who, "FAILED to back up '%s': %s",
++                     HostPathText(targetPath).c_str(), error.message().c_str());
++        return false;
++    }
++
++    std::filesystem::rename(tempPath, targetPath, error);
++    if (error) {
++        LogNandError(who, "FAILED to publish '%s': %s",
++                     HostPathText(targetPath).c_str(), error.message().c_str());
++        if (const auto rollbackError = RecoverNandBackup(targetPath, backupPath)) {
++            LogNandError(who, "FAILED to restore '%s': %s",
++                         HostPathText(backupPath).c_str(), rollbackError.message().c_str());
++        }
++        return false;
++    }
++
++    std::filesystem::remove(backupPath, error);
++    if (error) {
++        LogNandWarning(who, "could not remove backup '%s': %s",
++                       HostPathText(backupPath).c_str(), error.message().c_str());
++    }
++    return true;
+ #else
+     if (!NandRename(tempPath, targetPath)) {
+         LogNandError(who, "ERROR: rename('%s' -> '%s') failed",
+@@ -330,9 +442,8 @@ bool IsHostPathOpen(const std::filesystem::path& hostPath) {
+ }
+ 
+ // Retire a handle: flush writable handles all the way to disk and, when the handle is a
+-// shadow, atomically publish it over its commit target. On any failure the shadow is
+-// dropped and the original is left exactly as it was, and the error is returned so the
+-// guest's close call fails instead of silently reporting success.
++// shadow, publish it over the original. On a failed publish the error is returned
++// to the guest and the original is kept either at the target or in its backup.
+ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
+     std::filesystem::path tempPath;
+     std::filesystem::path commitPath;
+@@ -381,7 +492,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
+         return NAND_RESULT_UNKNOWN;
+     }
+ 
+-    if (!AtomicReplaceHostFile(who, tempPath, commitPath)) {
++    if (!ReplaceHostFile(who, tempPath, commitPath)) {
+         NandRemove(tempPath);
+         return NAND_RESULT_UNKNOWN;
+     }
+@@ -454,10 +565,7 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
+ 
+     // The scratch file starts as a byte-for-byte copy of the original and the guest is
+     // positioned at offset 0, so partial writes keep the bytes they never touch.
+-    std::error_code ec;
+-    std::filesystem::copy_file(hostPath, tempPath,
+-                               std::filesystem::copy_options::overwrite_existing, ec);
+-    if (ec) {
++    if (const auto ec = SeedNandShadow(hostPath, tempPath)) {
+         LogNandError("NANDSafeOpen", "FAILED to seed scratch file '%s' from '%s': %s",
+                 HostPathText(tempPath).c_str(), HostPathText(hostPath).c_str(),
+                 ec.message().c_str());
+diff --git a/runtime/src/hle/storage/nand_fs.cpp b/runtime/src/hle/storage/nand_fs.cpp
+index 3deb6aa..4479c0c 100644
+--- a/runtime/src/hle/storage/nand_fs.cpp
++++ b/runtime/src/hle/storage/nand_fs.cpp
+@@ -272,17 +272,18 @@ std::filesystem::path TranslateNandPath(const char* wiiPath) {
+         return {};
+     }
+ 
+-    std::filesystem::path redirectedHostPath;
+-    if (ResolveRiivolutionSaveHostPath(wiiPathStr, redirectedHostPath)) {
+-        return redirectedHostPath;
+-    }
+-    // Bluetooth passthrough keeps a SYSCONF of its own (the paired remotes), so normal play and LAN
+-    // never see one; without passthrough this path resolves as it always has.
+-    if (wiiPathStr == "/shared2/sys/SYSCONF" && BtPassthrough::SysconfHostPath(redirectedHostPath)) {
+-        return redirectedHostPath;
++    std::filesystem::path hostPath;
++    // Bluetooth passthrough keeps its paired remotes in a separate SYSCONF.
++    if (!ResolveRiivolutionSaveHostPath(wiiPathStr, hostPath) &&
++        !(wiiPathStr == "/shared2/sys/SYSCONF" && BtPassthrough::SysconfHostPath(hostPath))) {
++        hostPath = BuildHostNandPath(wiiPathStr);
++    }
++#ifdef __SWITCH__
++    if (!RecoverSwitchNandFile(hostPath)) {
++        return {};
+     }
+-
+-    return BuildHostNandPath(wiiPathStr);
++#endif
++    return hostPath;
+ }
+ 
+ // ============================================================================
+diff --git a/runtime/src/hle/storage/nand_internal.h b/runtime/src/hle/storage/nand_internal.h
+index 38c3011..68e2ea0 100644
+--- a/runtime/src/hle/storage/nand_internal.h
++++ b/runtime/src/hle/storage/nand_internal.h
+@@ -190,7 +190,12 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx);
+ 
+ // Shadow-write machinery, defined with the NANDSafeOpen/NANDSafeClose section below.
+ std::filesystem::path SafeTempPathFor(const std::filesystem::path& hostPath);
++std::error_code SeedNandShadow(const std::filesystem::path& source,
++                               const std::filesystem::path& scratch);
+ bool DiscardStaleSafeTemp(const std::filesystem::path& tempPath);
++#ifdef __SWITCH__
++bool RecoverSwitchNandFile(const std::filesystem::path& targetPath);
++#endif
+ bool IsHostPathOpen(const std::filesystem::path& hostPath);
+ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError);
+ 
+diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
+index e97d4d2..fff3c39 100644
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -43,11 +43,19 @@
+ #include <android/choreographer.h>
+ #include <android/looper.h>
+ #include <dlfcn.h>
++#elif defined(__SWITCH__)
++#include <switch.h>
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
+ #endif
+ 
+ #include <aurora/aurora.h>
+ #include <aurora/gfx.h>
+ 
++#if !defined(__SWITCH__)
++#define RT_FRAME_LOGF RT_LOGF
++#endif
++
+ // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
+ extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
+ 
+@@ -966,17 +974,64 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
+ // each frame's time went: the game (guest code and GX command building), aurora_end_frame (encoding,
+ // submission, and waiting on the GPU when it falls behind) and pacing to the retrace. A game share near
+ // the frame budget is CPU-bound; a large end_frame share is GPU-bound.
++#if defined(__SWITCH__)
++struct FrameCpuSample {
++    uint64_t ticks = 0;
++    bool valid = false;
++};
++
++static FrameCpuSample ReadFrameCpuSample() {
++    FrameCpuSample sample;
++    sample.valid = R_SUCCEEDED(svcGetInfo(&sample.ticks, InfoType_ThreadTickCount, CUR_THREAD_HANDLE,
++                                         TickCountInfo_Total));
++    return sample;
++}
++#endif
++
+ struct FrameTimes {
+     Clock::time_point windowStart{};
+     Clock::time_point lastPresentEnd{};
+     double gameMs = 0, endFrameMs = 0, paceMs = 0, worstMs = 0, sumSq = 0;
+     int slow = 0;
+     int frames = 0;
++#if defined(__SWITCH__)
++    std::thread::id lastSampleThread;
++    FrameCpuSample lastCpuSample;
++    double gameCpuMs = 0;
++    double rendererAndPaceCpuMs = 0;
++    double prepareMs = 0;
++    int cpuFrames = 0;
++#endif
++#if defined(NSMBW_USE_DEKO3D)
++    // Quarter-millisecond buckets plus a final bucket for frames of 128 ms or longer.
++    std::array<uint32_t, 513> frameDurationCounts{};
++
++    void CountDuration(double ms) {
++        const auto bucket = static_cast<size_t>(std::min(ms * 4, 512.0));
++        ++frameDurationCounts[bucket];
++    }
++
++    size_t Percentile95Bucket() const {
++        const auto rank = static_cast<uint32_t>(frames - frames / 20);
++        uint32_t cumulative = 0;
++        for (size_t i = 0; i < frameDurationCounts.size(); ++i) {
++            cumulative += frameDurationCounts[i];
++            if (cumulative >= rank) {
++                return i;
++            }
++        }
++        return frameDurationCounts.size() - 1;
++    }
++#endif
+ };
+ 
+ static bool LogFpsEnabled() {
++#if defined(__SWITCH__)
++    return switch_frame_profiling_enabled();
++#else
+     static const bool on = std::getenv("NSMBW_LOG_FPS") != nullptr;
+     return on;
++#endif
+ }
+ 
+ // The scheduler's idle time (no guest thread runnable, though its idle loop runs the audio DMA
+@@ -1153,6 +1208,10 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+     }
+ 
+     const Clock::time_point endFrameStart = Clock::now();
++#if defined(__SWITCH__)
++    const bool profileFrame = presentedXfb && LogFpsEnabled();
++    const FrameCpuSample beforeRenderer = profileFrame ? ReadFrameCpuSample() : FrameCpuSample{};
++#endif
+     aurora_end_frame();
+     const Clock::time_point paceStart = Clock::now();
+     if (paceThisFrame) {
+@@ -1160,6 +1219,10 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         std::lock_guard<std::mutex> lock(g_viMutex);
+         s_lastPacedRetraceCount = g_vi.retraceCount;
+     }
++    const Clock::time_point now = Clock::now();
++#if defined(__SWITCH__)
++    const FrameCpuSample afterRenderer = profileFrame ? ReadFrameCpuSample() : FrameCpuSample{};
++#endif
+     // Always on: a frame that took over 20 ms (a dropped frame at 60) goes to the log with where the
+     // time went, so a report of drops on someone's machine comes with its cause. At most 30 a minute.
+     // Battery Saver presents every other frame, so there a drop is a frame over 37 ms.
+@@ -1190,7 +1253,6 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         s_lastFaults = faults;
+         s_lastUser = user;
+         s_lastKernel = kernel;
+-        const Clock::time_point now = Clock::now();
+         if (s_lastEnd != Clock::time_point{}) {
+             const double frame = ms(now - s_lastEnd);
+             if (now - s_windowStart > std::chrono::minutes(1)) {
+@@ -1200,7 +1262,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+             if (frame > slowFrameMs && frame < 2000.0 && s_logged++ < 30) {
+                 uint32_t sceneWord = 0;
+                 Memory::TryRead32(0x80428730u, sceneWord);
+-                RT_LOGF(RT_TAG_VI,
++                RT_FRAME_LOGF(RT_TAG_VI,
+                         "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, disc %.2f in %u reads), present %.2f, "
+                         "end_frame %.2f, pace %.2f; thread cpu %.1f user + %.1f kernel, %u page faults\n",
+                         frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, dvdMs, frameReads,
+@@ -1211,7 +1273,18 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         s_lastEnd = now;
+     }
+     if (LogFpsEnabled() && presentedXfb) {
+-        const Clock::time_point now = Clock::now();
++#if defined(__SWITCH__)
++        const auto thread = std::this_thread::get_id();
++        if (thread == times.lastSampleThread && times.lastCpuSample.valid && beforeRenderer.valid &&
++            afterRenderer.valid && times.lastCpuSample.ticks <= beforeRenderer.ticks &&
++            beforeRenderer.ticks <= afterRenderer.ticks) {
++            times.gameCpuMs += armTicksToNs(beforeRenderer.ticks - times.lastCpuSample.ticks) / 1e6;
++            times.rendererAndPaceCpuMs += armTicksToNs(afterRenderer.ticks - beforeRenderer.ticks) / 1e6;
++            ++times.cpuFrames;
++        }
++        times.lastSampleThread = thread;
++        times.lastCpuSample = afterRenderer;
++#endif
+         if (times.lastPresentEnd != Clock::time_point{}) {
+             const double game = ms(presentStart - times.lastPresentEnd) + ms(endFrameStart - presentStart);
+             const double frame = ms(now - times.lastPresentEnd);
+@@ -1220,6 +1293,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+             times.paceMs += ms(now - paceStart);
+             times.worstMs = std::max(times.worstMs, frame);
+             times.sumSq += frame * frame;
++#if defined(NSMBW_USE_DEKO3D)
++            times.CountDuration(frame);
++#endif
+             times.slow += frame > slowFrameMs ? 1 : 0;
+             ++times.frames;
+         } else {
+@@ -1234,7 +1310,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+             const uint64_t unmerged = AuroraTakeUnmergedDraws();
+             uint64_t copies = 0, creates = 0;
+             AuroraTakeCopyStats(&copies, &creates);
+-            RT_LOGF(RT_TAG_VI,
++            RT_FRAME_LOGF(RT_TAG_VI,
+                     "fps %.1f: game %.2f ms (gx %.2f ms, lock wait %.2f ms, %.0f draws, %.0f unmerged, %.1f copies, "
+                     "%.1f new copy textures), end_frame %.2f ms, pace %.2f ms, worst frame %.1f ms, jitter %.2f ms, "
+                     "%d over %.0f ms\n",
+@@ -1243,6 +1319,24 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+                     copies / n, creates / n, times.endFrameMs / n, times.paceMs / n, times.worstMs,
+                     std::sqrt(std::max(0.0, times.sumSq / n - (window / n) * (window / n))), times.slow,
+                     slowFrameMs);
++#if defined(__SWITCH__)
++            uint32_t sceneWord = 0;
++            Memory::TryRead32(0x80428730u, sceneWord);
++            RT_FRAME_LOGF(RT_TAG_VI,
++                    "Switch frame profile scene 0x%03X: next-frame prepare %.2f ms, host thread active "
++                    "%.2f ms before end_frame, %.2f ms in end_frame and pace (%d/%d frames sampled)\n",
++                    sceneWord & 0xFFFFu, times.prepareMs / n,
++                    times.cpuFrames ? times.gameCpuMs / times.cpuFrames : 0.0,
++                    times.cpuFrames ? times.rendererAndPaceCpuMs / times.cpuFrames : 0.0,
++                    times.cpuFrames, times.frames);
++            switch_log_render_profile(times.frames);
++#if defined(NSMBW_USE_DEKO3D)
++            const size_t bucket = times.Percentile95Bucket();
++            const bool overflow = bucket == times.frameDurationCounts.size() - 1;
++            RT_FRAME_LOGF(RT_TAG_VI, "frame p95 %s%.2f ms (%d frames)\n",
++                          overflow ? ">=" : "<", (bucket + (overflow ? 0 : 1)) * 0.25, times.frames);
++#endif
++#endif
+             const uint32_t waits = g_idleWaits.exchange(0, std::memory_order_relaxed);
+             const uint32_t retraceEnds = g_idleRetraceEnds.exchange(0, std::memory_order_relaxed);
+             static uint32_t s_windowRetraceCount = 0;
+@@ -1251,7 +1345,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+                 std::lock_guard<std::mutex> lock(g_viMutex);
+                 retraceCount = g_vi.retraceCount;
+             }
+-            RT_LOGF(RT_TAG_VI,
++            RT_FRAME_LOGF(RT_TAG_VI,
+                     "idle %.2f ms a frame in %.1f waits, %.0f%% of them ending at a retrace; %.2f retraces a frame\n",
+                     g_idleNanos.exchange(0, std::memory_order_relaxed) / 1e6 / n, waits / n,
+                     waits ? 100.0 * retraceEnds / waits : 0.0,
+@@ -1275,14 +1369,14 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+                 std::snprintf(part, sizeof(part), " %08X %.2f ms;", threads[i].first, threads[i].second / 1e6 / n);
+                 waiters += part;
+             }
+-            RT_LOGF(RT_TAG_VI, "idle ended by (a frame):%s thread that waited:%s\n", enders.c_str(), waiters.c_str());
++            RT_FRAME_LOGF(RT_TAG_VI, "idle ended by (a frame):%s thread that waited:%s\n", enders.c_str(), waiters.c_str());
+             std::vector<std::pair<uint64_t, MainWait>> mainWaits(g_mainWaits.begin(), g_mainWaits.end());
+             std::sort(mainWaits.begin(), mainWaits.end(),
+                       [](const auto& a, const auto& b) { return a.second.blocked > b.second.blocked; });
+             for (size_t i = 0; i < mainWaits.size() && i < 5; ++i) {
+                 const MainWait& wait = mainWaits[i].second;
+                 const uint32_t lr = static_cast<uint32_t>(mainWaits[i].first);
+-                RT_LOGF(RT_TAG_VI, "main thread slept %.2f ms a frame (%.2f idle, %.1f times) on queue %08X from %08X\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "main thread slept %.2f ms a frame (%.2f idle, %.1f times) on queue %08X from %08X\n",
+                         wait.blocked / 1e6 / n, wait.idle / 1e6 / n, wait.count / n,
+                         static_cast<uint32_t>(mainWaits[i].first >> 32), lr);
+             }
+@@ -1291,21 +1385,21 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+                 uint32_t mixes = 0;
+                 int mixCpu = -1;
+                 AxDspHle::TakeMixStats(&mixNanos, &mixWaitNanos, &mixes, &mixCpu);
+-                RT_LOGF(RT_TAG_VI, "audio mix: %.2f ms a frame in %.1f mixes (%.3f ms each, last on cpu %d), guest waited %.2f ms\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "audio mix: %.2f ms a frame in %.1f mixes (%.3f ms each, last on cpu %d), guest waited %.2f ms\n",
+                         mixNanos / 1e6 / n, mixes / n, mixes ? mixNanos / 1e6 / mixes : 0.0, mixCpu,
+                         mixWaitNanos / 1e6 / n);
+                 uint64_t steps[7] = {};
+                 OS_HLE_TakeIdleSteps(steps);
+-                RT_LOGF(RT_TAG_VI, "retrace poll sleeps: %.2f ms a frame in %.1f (%.1f begun)\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "retrace poll sleeps: %.2f ms a frame in %.1f (%.1f begun)\n",
+                         g_retracePollSleepNanos.exchange(0) / 1e6 / n, g_retracePollSleeps.exchange(0) / n,
+                         g_retracePollEntries.exchange(0) / n);
+-                RT_LOGF(RT_TAG_VI, "idle loop (ms a frame): sleep timers %.2f, audio %.2f, retrace %.2f, fiber timers %.2f, "
++                RT_FRAME_LOGF(RT_TAG_VI, "idle loop (ms a frame): sleep timers %.2f, audio %.2f, retrace %.2f, fiber timers %.2f, "
+                         "alarms %.2f, wait %.2f; %.1f passes\n", steps[0] / 1e6 / n, steps[1] / 1e6 / n, steps[2] / 1e6 / n,
+                         steps[3] / 1e6 / n, steps[4] / 1e6 / n, steps[5] / 1e6 / n, steps[6] / n);
+                 uint64_t pushNanos = 0, callbackNanos = 0;
+                 uint32_t blocks = 0;
+                 Audio_HLE_TakeTickStats(&pushNanos, &callbackNanos, &blocks);
+-                RT_LOGF(RT_TAG_VI, "audio blocks: %.1f a frame, speaker push %.2f ms, AI callback %.2f ms (%.3f ms each)\n",
++                RT_FRAME_LOGF(RT_TAG_VI, "audio blocks: %.1f a frame, speaker push %.2f ms, AI callback %.2f ms (%.3f ms each)\n",
+                         blocks / n, pushNanos / 1e6 / n, callbackNanos / 1e6 / n,
+                         blocks ? callbackNanos / 1e6 / blocks : 0.0);
+             }
+@@ -1314,6 +1408,10 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+             g_idleCountByEnder.fill(0);
+             g_idleByThread.clear();
+             times = FrameTimes{};
++#if defined(__SWITCH__)
++            times.lastSampleThread = thread;
++            times.lastCpuSample = afterRenderer;
++#endif
+             times.windowStart = now;
+             times.lastPresentEnd = now;
+         }
+@@ -1328,10 +1426,18 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+     }
+     // Pre-warm the next frame so subsequent GX work has a valid frame context.
+     {
++#if defined(__SWITCH__)
++        const Clock::time_point prepareStart = profileFrame ? Clock::now() : Clock::time_point{};
++#endif
+         UpdateAuroraAndProcessEvents();
+         if (BeginAuroraFrame()) {
+             g_auroraFrameActive.store(true, std::memory_order_release);
+         }
++#if defined(__SWITCH__)
++        if (profileFrame) {
++            times.prepareMs += ms(Clock::now() - prepareStart);
++        }
++#endif
+     }
+ }
+ 
+diff --git a/runtime/src/host_context.cpp b/runtime/src/host_context.cpp
+index 5932fe1..d6ef10b 100644
+--- a/runtime/src/host_context.cpp
++++ b/runtime/src/host_context.cpp
+@@ -8,9 +8,13 @@
+ #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
+-#elif (defined(__APPLE__) || defined(__ANDROID__)) && defined(__aarch64__)
++#elif (defined(__APPLE__) || defined(__ANDROID__) || defined(__SWITCH__)) && defined(__aarch64__)
++#if defined(__SWITCH__)
++#include <cstdlib>
++#else
+ #include <sys/mman.h>
+ #include <unistd.h>
++#endif
+ #if defined(__ANDROID__)
+ #include <pthread.h>
+ 
+@@ -78,7 +82,7 @@ void Switch(Handle target)
+     SwitchToFiber(target);
+ }
+ 
+-#elif (defined(__APPLE__) || defined(__ANDROID__)) && defined(__aarch64__)
++#elif (defined(__APPLE__) || defined(__ANDROID__) || defined(__SWITCH__)) && defined(__aarch64__)
+ 
+ namespace {
+ struct Context {
+@@ -167,12 +171,23 @@ void ShutdownScheduler(Handle scheduler)
+ Handle Create(std::size_t stackSize, Entry entry, void* argument)
+ {
+     auto* context = new Context();
++#if defined(__SWITCH__)
++    const std::size_t guardSize = 0;
++    const std::size_t totalSize = (stackSize + 0xFFFu) & ~std::size_t(0xFFFu);
++    context->stack = std::aligned_alloc(0x1000, totalSize);
++    if (context->stack == nullptr) {
++        delete context;
++        return nullptr;
++    }
++#else
+     const std::size_t guardSize = static_cast<std::size_t>(getpagesize());
+     const std::size_t totalSize = stackSize + guardSize;
++#endif
+ #if defined(__ANDROID__)
+     context->stack = AllocateArenaStack(totalSize);
+     context->arenaStack = context->stack != nullptr;
+ #endif
++#if !defined(__SWITCH__)
+     if (!context->stack) {
+         context->stack = mmap(nullptr, totalSize, PROT_READ | PROT_WRITE,
+                               MAP_ANON | MAP_PRIVATE, -1, 0);
+@@ -189,6 +204,7 @@ Handle Create(std::size_t stackSize, Entry entry, void* argument)
+         delete context;
+         return nullptr;
+     }
++#endif
+     context->stackSize = totalSize;
+ 
+     auto* stackTop = static_cast<char*>(context->stack) + totalSize;
+@@ -211,7 +227,11 @@ void Destroy(Handle context)
+             g_arena.freed.emplace_back(nativeContext->stack, nativeContext->stackSize);
+         } else
+ #endif
++#if defined(__SWITCH__)
++        std::free(nativeContext->stack);
++#else
+         munmap(nativeContext->stack, nativeContext->stackSize);
++#endif
+     }
+     delete nativeContext;
+ }
+diff --git a/runtime/src/key_caps.cpp b/runtime/src/key_caps.cpp
+index 8ce0aa2..d2a267a 100644
+--- a/runtime/src/key_caps.cpp
++++ b/runtime/src/key_caps.cpp
+@@ -6,6 +6,9 @@
+ #include "runtime_config.h"
+ #include "runtime_log.h"
+ #include "settings_overlay.h"
++#if defined(__SWITCH__)
++#include "switch/menu_controls.h"
++#endif
+ 
+ #include <aurora/imgui.h>
+ #include <dolphin/gx/GXAurora.h>
+@@ -393,8 +396,13 @@ Glyph PadGlyph(uint32_t native) {
+         return g;
+     }
+     switch (native) {
++#if defined(__SWITCH__)
++    case SDL_GAMEPAD_BUTTON_SOUTH: round("B", 0xC8302A); break;
++    case SDL_GAMEPAD_BUTTON_EAST: round("A", 0x3C9C2A); break;
++#else
+     case SDL_GAMEPAD_BUTTON_SOUTH: round("A", 0x3C9C2A); break;  // Xbox's green A, red B, blue X, yellow Y
+     case SDL_GAMEPAD_BUTTON_EAST: round("B", 0xC8302A); break;
++#endif
+     case SDL_GAMEPAD_BUTTON_WEST: round("X", 0x2A64C8); break;
+     case SDL_GAMEPAD_BUTTON_NORTH: round("Y", 0xC89600); break;
+     case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: cap("LB"); break;
+@@ -510,7 +518,7 @@ std::vector<Glyph> PadGlyphs(int action) {
+     return glyphs;
+ }
+ 
+-std::vector<CellContent> Contents(PromptStyle::Style style) {
++std::vector<CellContent> Contents(PromptStyle::Style style, bool menuButtons) {
+     std::vector<CellContent> cells = {{kCodeTwo, {}}, {kCodeOne, {}}, {kCodeA, {}}, {kCodePlus, {}}, {kCodeMinus, {}},
+                                       {kCodeDPad, {}}};
+     const int actions[5] = {Keybinds::kJump, Keybinds::kRun, Keybinds::kA, Keybinds::kPlus, Keybinds::kMinus};
+@@ -532,6 +540,7 @@ std::vector<CellContent> Contents(PromptStyle::Style style) {
+         }
+     } else if (style == PromptStyle::Style::Controller) {
+         for (int i = 0; i < 5; ++i) cells[i].glyphs = PadGlyphs(actions[i]);
++        if (menuButtons) std::swap(cells[0].glyphs, cells[1].glyphs);
+         // The D-pad stays the game's own cross: a controller's D-pad (and stick) moves as it shows.
+     }
+     return cells;
+@@ -816,6 +825,12 @@ void Update() {
+     static uint32_t s_generation = 0xFFFFFFFFu;
+     const PromptStyle::Style style = PromptStyle::Current();
+     const int scale = WantedScale();
++#if defined(__SWITCH__)
++    const bool menuButtons = style == PromptStyle::Style::Controller && SwitchUsesMenuButtons();
++#else
++    constexpr bool menuButtons = false;
++#endif
++    static bool s_menuButtons = false;
+     // Any binding written (Settings' Keybinds or Controller tab, F10 > Controls, Reset Defaults, a
+     // combination taken or cleared, a controller connecting with Config.toml's buttons) bumps
+     // Keybinds::BindingsGeneration: the prompts follow at once. The look every 30 frames stays as a
+@@ -823,14 +838,15 @@ void Update() {
+     static uint32_t s_bindings = 0xFFFFFFFFu;
+     const uint32_t bindings = Keybinds::BindingsGeneration();
+     const bool changed = static_cast<uint32_t>(style) != s_style || PromptStyle::Generation() != s_generation ||
+-                         scale != g_state.scale || bindings != s_bindings;
++                         scale != g_state.scale || bindings != s_bindings || menuButtons != s_menuButtons;
+     if (!changed && ++g_state.checkFrame % 30 != 0) {
+         return;
+     }
+     s_style = static_cast<uint32_t>(style);
+     s_generation = PromptStyle::Generation();
+     s_bindings = bindings;
+-    const std::vector<CellContent> cells = Contents(style);
++    s_menuButtons = menuButtons;
++    const std::vector<CellContent> cells = Contents(style, menuButtons);
+     const bool any = std::any_of(cells.begin(), cells.end(), [](const CellContent& c) { return !c.glyphs.empty(); });
+     const std::string signature = any ? Signature(cells) : std::string();
+     if (signature == g_state.signature && scale == g_state.scale) {
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 3a07789..08db2e1 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -70,6 +70,7 @@
+ #include "det_clock.h"
+ #include "game_folder.h"
+ #include "abi_bridge.h"
++#include "controller_button_names.h"
+ #include "guest_flat_memory.h"
+ #include "gx_guest_write.h"
+ #include "hle/audio/axfx_reverb_native.h"
+@@ -85,6 +86,12 @@
+ #include "hle_stubs.h"
+ #include "runtime_config.h"
+ #include "runtime_log.h"
++#if defined(__SWITCH__)
++#include "switch/frame_log.h"
++#if defined(NSMBW_USE_DEKO3D)
++extern "C" bool switch_mount_shader_seed();
++#endif
++#endif
+ #include "updater.h"
+ #include "runtime_product.h"
+ #include "recomp_mod_loader.h"
+@@ -914,6 +921,15 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
+                               const char* message, unsigned int len) {
+     const std::string_view moduleView = module != nullptr ? std::string_view(module) : std::string_view{};
+     const std::string_view messageView = message != nullptr ? std::string_view(message, len) : std::string_view{};
++#if defined(__SWITCH__)
++    if (moduleView == "aurora" &&
++        ((level == LOG_INFO && messageView.starts_with("Presentation hitch:")) ||
++         (level == LOG_WARNING && messageView.starts_with("Presentation job took ")))) {
++        switch_frame_logf("[aurora] [%d] [aurora] %.*s\n", static_cast<int>(level),
++                          static_cast<int>(messageView.size()), messageView.data());
++        return;
++    }
++#endif
+     std::cerr << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
+               << messageView << std::endl;
+ #if defined(__linux__) && !defined(__ANDROID__)
+@@ -1222,7 +1238,12 @@ void ReportUnhandledSignalFault(int sig, void* faultAddress) {
+ }
+ 
+ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
++#if defined(__SWITCH__)
++    // newlib's siginfo_t has no si_addr; Horizon never delivers SIGSEGV to homebrew anyway.
++    void* faultAddress = nullptr;
++#else
+     void* faultAddress = info != nullptr ? info->si_addr : nullptr;
++#endif
+     bool isWrite = false;
+ #if defined(__x86_64__)
+     // Standard glibc technique for a POSIX fastmem-style handler: bit 1 (0x2) of the hardware
+@@ -1249,7 +1270,11 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+         g_sehLastExceptionAddress = reinterpret_cast<uintptr_t>(faultAddress);
+         g_sehLastAccessType = isWrite ? 1u : 0u;
+         g_sehLastAccessedAddress = reinterpret_cast<uintptr_t>(faultAddress);
++#if defined(__SWITCH__)
++        longjmp(*g_sehJumpTarget, 1);
++#else
+         siglongjmp(*g_sehJumpTarget, 1);
++#endif
+     }
+     if (g_suppressSehReporting) {
+         // Reporting suppressed but nobody armed a recovery jump: restore the default disposition
+@@ -1290,6 +1315,10 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+ }
+ 
+ void InstallPosixMemoryFaultHandler() {
++#if defined(__SWITCH__)
++    // Horizon has no user fault handler and the checked-access memory path does not need one.
++    return;
++#else
+     struct sigaction action {};
+     action.sa_sigaction = PosixMemoryFaultHandler;
+     action.sa_flags = SA_SIGINFO;
+@@ -1299,6 +1328,7 @@ void InstallPosixMemoryFaultHandler() {
+     // SIGSEGV on Linux; region sizing should make this unreachable, but routing it to the same
+     // handler costs nothing and avoids a silent gap if it ever isn't.
+     sigaction(SIGBUS, &action, nullptr);
++#endif
+ }
+ #endif
+ 
+@@ -1420,25 +1450,48 @@ int RuntimeMain(int argc, char** argv) {
+     InstallPosixMemoryFaultHandler();
+ #endif
+     InitializeProcessTranscript(argc, argv);
++    switch_trace_mark("RM: transcript");
+     std::signal(SIGABRT, AbortSignalHandler);
++    switch_trace_mark("RM: signal");
+     // Install exit/terminate handlers to ensure we get crash info
+     std::atexit(AtExitHandler);
++    switch_trace_mark("RM: atexit");
+     std::set_terminate(TerminateHandler);
++    switch_trace_mark("RM: set_terminate");
+     
+     std::string currentEntryLabel;
++    switch_trace_mark("RM: entry label");
++    {
++        char argcLine[48];
++        std::snprintf(argcLine, sizeof argcLine, "RM: argc=%d argv0=%s", argc,
++                      argc > 0 && argv != nullptr && argv[0] != nullptr ? argv[0] : "(none)");
++        switch_trace_mark(argcLine);
++    }
+ 
+     try {
++        switch_trace_mark("RM: try enter");
++#if defined(__SWITCH__)
++        // Horizon supplies launch parameters from the title's own metadata (they are not command-line
++        // options), so argc is not necessarily 1. The runtime takes every setting from Config.toml,
++        // which is the only supported configuration path here anyway.
++        (void)argc;
++#else
+         if (argc != 1) {
+             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
+         }
++#endif
++        switch_trace_mark("RM: argc ok");
+         RuntimeConfigFile::LogLoadedConfig();
++        switch_trace_mark("RM: config logged");
+         // The player's own extracted game (game_folder.h); on Windows it is asked for at first start.
+         if (!GameFolder::EnsureConfigured()) {
+             SetRuntimeExitCodeImpl(0);
+             ShutdownProcessTranscript();
+             return 0;
+         }
++        switch_trace_mark("RM: game folder configured");
+         GameFolder::RetailDisc();  // main.dol hashed once here, not when the Settings window first asks
++        switch_trace_mark("RM: retail disc");
+ #if defined(__ANDROID__)
+         // Determinism testing on a phone: debug.nsmbw.det=1 turns the lockstep timing on,
+         // debug.nsmbw.dethash / detdump set NSMBW_DET_HASH / NSMBW_DET_DUMP (det_hash.h) and
+@@ -1506,21 +1559,30 @@ int RuntimeMain(int argc, char** argv) {
+         }
+         // Bluetooth passthrough: look for a USB Bluetooth adapter while the graphics start up. Knows by
+         // now whether this run is a LAN session or deterministic, where it stays off.
++        switch_trace_mark("RM: netplay done");
+         BtPassthrough::StartProbe();
++        switch_trace_mark("RM: bt probe");
+         if (RuntimeConfigFile::DiscordPresenceEnabled()) {
+             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(),
+                                         RuntimeProduct::Active().displayName.data());
+         }
++        switch_trace_mark("RM: discord done");
+         SystemBridge::Initialize();
++        switch_trace_mark("RM: system bridge");
+         TranslatedFunctionRegistry::Finalize();
++        switch_trace_mark("RM: function registry");
+ 
+         // Initialize Aurora (graphics backend)
+         // We use auto backend (or specific if needed) and set a default window size.
+         // This is required for GX commands (like texture loading) to work.
++        switch_trace_mark("RM: aurora config start");
+         AuroraConfig auroraConfig = {};
+         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
+         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
+-        const auto rendererCacheDirectory = applicationDataDirectory / "Cache";
++        auto rendererCacheDirectory = applicationDataDirectory / "Cache";
++#if defined(NSMBW_USE_DEKO3D)
++        rendererCacheDirectory /= "deko3d";
++#endif
+         std::error_code rendererPathError;
+         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
+         if (rendererPathError) {
+@@ -1540,8 +1602,18 @@ int RuntimeMain(int argc, char** argv) {
+         if (!auroraResourcesPath.empty()) {
+             auroraConfig.resourcesPath = auroraResourcesPath.c_str();
+         }
++#if defined(NSMBW_USE_DEKO3D)
++        if (switch_mount_shader_seed()) {
++            auroraConfig.resourcesPath = "romfs:/";
++        }
++#endif
+         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
++#if defined(__SWITCH__)
++        // GX can emit debug diagnostics for each draw. Horizon writes stdio to the SD card.
++        auroraConfig.logLevel = LOG_INFO;
++#else
+         auroraConfig.logLevel = LOG_DEBUG;
++#endif
+         // NSMBW display settings: aspect_mode, else the older widescreen/force_16_9 keys.
+         DisplaySettings::Settings displaySettings;
+         displaySettings.aspect = RuntimeConfigFile::AspectMode(
+@@ -1550,6 +1622,10 @@ int RuntimeMain(int argc, char** argv) {
+                                                           : DisplaySettings::kAspectFill);
+         displaySettings.renderScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+         DisplaySettings::Initialize(displaySettings);
++        static constexpr const char* kButtonLayoutNames[] = {"auto", "playstation", "xbox", "nintendo"};
++        const int32_t buttonLayoutIndex = RuntimeConfigFile::ButtonLayout(0);
++        ControllerNames::SetLayout(static_cast<ControllerNames::Layout>(buttonLayoutIndex));
++        RT_LOGF(RT_TAG_RUNTIME, "button labels: %s\n", kButtonLayoutNames[buttonLayoutIndex]);
+         const bool configWidescreen = DisplaySettings::GameWidescreen();
+         auroraConfig.windowWidth = configWidescreen ? 854 : 640;
+         auroraConfig.windowHeight = 480;
+@@ -1582,6 +1658,14 @@ int RuntimeMain(int argc, char** argv) {
+         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
+         }};
++#elif defined(__SWITCH__)
++        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
++#if defined(NSMBW_USE_DEKO3D)
++            {"auto", BACKEND_AUTO}, {"deko3d", BACKEND_DEKO3D},
++#else
++            {"auto", BACKEND_AUTO}, {"deko3d", BACKEND_AUTO},
++#endif
++        }};
+ #elif defined(__ANDROID__)
+         // NSMBW: OpenGL ES can't be picked for now (walled off for a later version); a saved
+         // "opengles" runs Vulkan.
+@@ -1642,7 +1726,17 @@ int RuntimeMain(int argc, char** argv) {
+ #endif
+ 
+ 
++        switch_trace_mark("RM: aurora config built");
+         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
++        switch_trace_mark("RM: aurora initialized");
++        {
++            char line[256];
++            std::snprintf(line, sizeof line, "RM: aurora status=%d error=%s",
++                          static_cast<int>(auroraInfo.initializationStatus),
++                          auroraInfo.initializationError != nullptr ? auroraInfo.initializationError
++                                                                    : "(none)");
++            switch_trace_mark(line);
++        }
+         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
+             throw std::runtime_error(auroraInfo.initializationError != nullptr
+                 ? auroraInfo.initializationError : "No supported graphics backend is available");
+@@ -1669,12 +1763,18 @@ int RuntimeMain(int argc, char** argv) {
+         RT_LOG(RT_TAG_RUNTIME) << "graphics adapter: " << GraphicsInfo::Name() << ", compatibility fixes "
+                   << (auroraInfo.gpuCompatActive ? "on" : "off") << std::endl;
+         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
++        switch_trace_mark("RM: frame worker callback");
+         GxGuestWrite::InstallAuroraHooks();
++        switch_trace_mark("RM: gx hooks");
+         AxfxReverbNative::Install();
++        switch_trace_mark("RM: reverb");
+         DisplaySettings::OnFrameBoundary(auroraInfo.windowSize.native_fb_width,
+                                          auroraInfo.windowSize.native_fb_height);
++        switch_trace_mark("RM: frame boundary");
+         settings_overlay::InitializeRuntimeSettings();
++        switch_trace_mark("RM: runtime settings");
+         Updater::Start();  // the file select's Update button: checks GitHub in the background
++        switch_trace_mark("RM: updater");
+         static constexpr const char* kAspectNames[] = {"original 4:3", "16:9", "fill", "16:10"};
+         RT_LOG(RT_TAG_CONFIG) << "display aspect=" << kAspectNames[displaySettings.aspect]
+                   << " SCGetAspectRatio=" << (configWidescreen ? 1 : 0)
+@@ -1684,15 +1784,19 @@ int RuntimeMain(int argc, char** argv) {
+                   << " native=" << auroraInfo.windowSize.native_fb_width << "x"
+                   << auroraInfo.windowSize.native_fb_height << std::endl;
+         g_auroraInitialized.store(true, std::memory_order_release);
++        switch_trace_mark("RM: aurora flag");
+         settings_overlay::RunShaderLoadingScreen();
++        switch_trace_mark("RM: loading screen");
+ 
+         auto entry = ResolveEntry();
++        switch_trace_mark("RM: entry resolved");
+         InitializePersistentCpuContext();
+         auto& cpu = GetPersistentCpuContext();
+         SeedCpuContext(cpu);
+         
+         // Initialize the fiber-based threading system
+         Fiber::GuestFiberManager::Initialize();
++        switch_trace_mark("RM: fibers");
+ 
+         // Deterministic mode: the controllers as boot sees them, until the first retrace latches.
+         if (DetClock::Enabled()) {
+@@ -1760,7 +1864,12 @@ extern "C" __attribute__((visibility("default"))) int SDL_main(int argc, char**
+     return RuntimeMain(argc, argv);
+ }
+ #else
++extern "C" void switch_trace_mark(const char*);
+ int main(int argc, char** argv) {
++    switch_trace_mark("MAIN");
++#if defined(__SWITCH__)
++    switch_start_frame_log();
++#endif
+     return RuntimeMain(argc, argv);
+ }
+ #endif
+diff --git a/runtime/src/memory.cpp b/runtime/src/memory.cpp
+index 47d69c6..16d4aed 100644
+--- a/runtime/src/memory.cpp
++++ b/runtime/src/memory.cpp
+@@ -61,6 +61,8 @@ template void MemoryInline::WriteResolvedFallback<uint32_t>(uint32_t, uint32_t);
+ template void MemoryInline::WriteResolvedFallback<uint64_t>(uint32_t, uint64_t);
+ void MemoryInline::WriteResolvedFallbackFloat32(uint32_t addr, double val) { Memory::WriteFloat32(addr, val); }
+ void MemoryInline::WriteResolvedFallbackFloat64(uint32_t addr, double val) { Memory::WriteFloat64(addr, val); }
++extern "C" void switch_trace_mark(const char*);
++
+ namespace {
+ struct DeferredRead {
+     uint64_t token = 0;
+@@ -583,6 +585,7 @@ void Memory::Init(const Config& config) {
+         }
+         GuestFlat::Initialize(flatRegions);
+     }
++    switch_trace_mark("MEM: flat initialized");
+ 
+     // Map virtual regions onto that backing store, with mirroring.
+     for (const auto& regionConfig : config.regions) {
+@@ -597,9 +600,12 @@ void Memory::Init(const Config& config) {
+ 
+         regions.emplace_back(std::move(instance));
+     }
++    switch_trace_mark("MEM: regions built");
+ 
+     BuildPageTable();
++    switch_trace_mark("MEM: page table");
+     RefreshFastPathTables();
++    switch_trace_mark("MEM: fast paths");
+ }
+ 
+ void Memory::Reset() {
+diff --git a/runtime/src/netplay/netplay_lobby.cpp b/runtime/src/netplay/netplay_lobby.cpp
+index e13588d..0d97fc0 100644
+--- a/runtime/src/netplay/netplay_lobby.cpp
++++ b/runtime/src/netplay/netplay_lobby.cpp
+@@ -11,6 +11,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdlib>
+ #include <cstring>
+ #include <filesystem>
+@@ -113,6 +114,11 @@ struct HostMember {
+     uint32_t nonce = 0;
+     Clock::time_point lastHeard{};
+     uint32_t rttMs = 0;
++    // The spread of the round trip while the room was open, not just its latest value: the input
++    // buffer has to cover the spread, or a packet that arrives late stops everyone (InputDelayFrames).
++    uint32_t rttMinMs = 0;
++    uint32_t rttMaxMs = 0;
++    uint32_t rttSamples = 0;
+     // Start: which chunks it has, and whether it stored everything.
+     std::vector<bool> chunks;
+     bool started = false;
+@@ -566,6 +572,9 @@ void HostPacketLocked(State& s, const Netplay::Address& from, uint8_t type, uint
+         }
+         if (echo != 0 && NowMs() >= echo + echoDelay) {
+             member->rttMs = NowMs() - echo - echoDelay;
++            member->rttMinMs = member->rttSamples == 0 ? member->rttMs : std::min(member->rttMinMs, member->rttMs);
++            member->rttMaxMs = std::max(member->rttMaxMs, member->rttMs);
++            ++member->rttSamples;
+         }
+         if (phase >= static_cast<uint8_t>(Phase::Starting)) {
+             member->started = true;
+@@ -1211,6 +1220,22 @@ bool ConnectDirect(const std::string& address) {
+     return true;
+ }
+ 
++// Frames between sampling a controller and that input taking effect on every device.
++//
++// A client's input has to reach the host before the host can run the frame, and in a three or four
++// player session the host relays it on, so it crosses two one-way trips before the other clients
++// have it. The buffer must cover that longest path plus the jitter measured while the room was
++// open, and it must round up: a buffer that rounds down is a buffer that stalls. One extra frame
++// absorbs scheduling. For two players this lands on Dolphin's rule of thumb (about one buffer frame
++// per 16 ms of ping, plus one for spikes).
++static uint32_t InputDelayFrames(uint32_t worstRttMs, uint32_t jitterMs, uint32_t players) {
++    constexpr double kFrameMs = 1000.0 / 59.94;
++    const double oneWayMs = worstRttMs * 0.5;
++    const double pathMs = players > 2 ? oneWayMs * 2.0 : oneWayMs;
++    const int frames = static_cast<int>(std::ceil((pathMs + static_cast<double>(jitterMs) + 8.0) / kFrameMs)) + 1;
++    return static_cast<uint32_t>(std::clamp(frames, 2, 20));
++}
++
+ void Start() {
+     State& s = S();
+     std::lock_guard<std::mutex> lock(s.mutex);
+@@ -1229,16 +1254,25 @@ void Start() {
+     // Slots are handed out in join order; renumber so they are contiguous.
+     std::sort(s.members.begin(), s.members.end(), [](const HostMember& a, const HostMember& b) { return a.slot < b.slot; });
+     uint32_t worstRtt = 0;
++    uint32_t worstJitter = 0;
+     for (size_t i = 0; i < s.members.size(); ++i) {
+         s.members[i].slot = static_cast<uint8_t>(i + 1);
+         s.members[i].chunks.assign((blob.size() + kChunk - 1) / kChunk, false);
+         s.members[i].started = s.members[i].ready = false;
+         worstRtt = std::max(worstRtt, s.members[i].rttMs);
++        if (s.members[i].rttSamples > 1) {
++            worstJitter = std::max(worstJitter, s.members[i].rttMaxMs - s.members[i].rttMinMs);
++        }
+     }
+     plan.players = static_cast<uint8_t>(1 + s.members.size());
+     plan.localSlot = 0;
+-    // Enough frames of input delay to cover half a round trip (clients' input goes through the host).
+-    plan.inputDelay = std::clamp<uint32_t>((worstRtt / 2 + 12 + 16) / 17, 2, 8);
++    // Enough frames of input delay to cover the longest path an input takes, plus its jitter. Too
++    // small is not "lower latency": the frame simply waits, everyone freezes, and then the frames
++    // run back to back to catch up, which is what stutter looks like in a lockstep session.
++    plan.inputDelay = InputDelayFrames(worstRtt, worstJitter, plan.players);
++    if (const int32_t manual = RuntimeConfigFile::NetplayInputDelay(); manual > 0) {
++        plan.inputDelay = static_cast<uint32_t>(manual);
++    }
+     plan.saveFile = s.saveFile;
+     plan.names = {Netplay::DeviceName()};
+     for (const auto& m : s.members) {
+@@ -1252,8 +1286,10 @@ void Start() {
+     s.phase = Phase::Starting;
+     s.startedAt = Clock::now();
+     s.message = "Sending your save to everyone...";
+-    RT_LOGF(RT_TAG_RUNTIME, "netplay: starting session %llu with %u players, input delay %u (worst RTT %u ms)\n",
+-            static_cast<unsigned long long>(plan.sessionId), plan.players, plan.inputDelay, worstRtt);
++    RT_LOGF(RT_TAG_RUNTIME,
++            "netplay: starting session %llu with %u players, input delay %u frames (worst RTT %u ms, jitter %u ms%s)\n",
++            static_cast<unsigned long long>(plan.sessionId), plan.players, plan.inputDelay, worstRtt, worstJitter,
++            RuntimeConfigFile::NetplayInputDelay() > 0 ? ", set by hand" : "");
+ }
+ 
+ void Stop() {
+diff --git a/runtime/src/netplay/netplay_session.cpp b/runtime/src/netplay/netplay_session.cpp
+index d7f1236..e549eb3 100644
+--- a/runtime/src/netplay/netplay_session.cpp
++++ b/runtime/src/netplay/netplay_session.cpp
+@@ -659,6 +659,12 @@ void FrameSource(uint32_t retrace, FrameInput::Frame& frame) {
+         }
+     }
+     s.waitingFor = -1;
++    if (waited) {
++        // Waiting for the network leaves the pacing anchor in the past, so the frames that follow
++        // would run back to back to "catch up" with it. Resume from now instead: the session stays
++        // in step without the visible burst.
++        DetClock::ResetPacing();
++    }
+ 
+     for (uint32_t chan = 0; chan < frame.size(); ++chan) {
+         FrameInput::Remote& remote = frame[chan];
+@@ -816,8 +822,10 @@ Status GetStatus() {
+     }
+     status.desyncFrame = s.desyncFrame;
+     status.lostSlot = s.lostSlot;
++    status.inputDelay = s.config.inputDelay;
+     for (int slot = 0; slot < kMaxSlots; ++slot) {
+-        status.pingMs[slot] = s.remotes[slot].rttMs;
++        // 0xFFFFFFFF: nothing heard from that slot yet; a real 0 ms on loopback still shows.
++        status.pingMs[slot] = s.remotes[slot].heard ? s.remotes[slot].rttMs : 0xFFFFFFFFu;
+     }
+     return status;
+ }
+diff --git a/runtime/src/netplay/netplay_start.cpp b/runtime/src/netplay/netplay_start.cpp
+index 2fcd06e..0eeadf5 100644
+--- a/runtime/src/netplay/netplay_start.cpp
++++ b/runtime/src/netplay/netplay_start.cpp
+@@ -21,6 +21,11 @@
+ #elif defined(__linux__) && !defined(__ANDROID__)
+ #include <fcntl.h>
+ #include <unistd.h>
++#elif defined(__APPLE__)
++#include <fcntl.h>
++#include <mach-o/dyld.h>
++#include <unistd.h>
++#include <vector>
+ #endif
+ 
+ #if defined(__ANDROID__)
+@@ -91,6 +96,23 @@ std::filesystem::path SaveFile() {
+         execv(exe, argv);
+     }
+     RT_LOGF(RT_TAG_RUNTIME, "netplay: could not start the game again\n");
++#elif defined(__APPLE__)
++    // macOS: the same program again in this process's place. There is no /proc, so every descriptor
++    // from 3 up is marked close-on-exec instead: the lobby's LAN socket must not survive, or the
++    // session cannot bind port 52130. The test driver's variable is dropped so a scripted lobby run
++    // does not open a second room after the restart.
++    char exe[PATH_MAX] = {};
++    uint32_t exeSize = sizeof(exe);
++    if (_NSGetExecutablePath(exe, &exeSize) == 0) {
++        EndProcessTranscript();
++        for (int fd = 3; fd < 512; ++fd) {
++            fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
++        }
++        unsetenv("NSMBW_LOBBY_TEST");
++        char* const argv[] = {exe, nullptr};
++        execv(exe, argv);
++    }
++    RT_LOGF(RT_TAG_RUNTIME, "netplay: could not start the game again\n");
+ #endif
+     std::_Exit(0);
+ }
+diff --git a/runtime/src/netplay/netplay_ui.cpp b/runtime/src/netplay/netplay_ui.cpp
+index b74ff2c..2242266 100644
+--- a/runtime/src/netplay/netplay_ui.cpp
++++ b/runtime/src/netplay/netplay_ui.cpp
+@@ -3096,10 +3096,11 @@ void HandleSettingsInput(bool left, bool right, bool up, bool down, bool confirm
+ 
+ void DrawLan(const Canvas& c) {
+     Window(c, 322);
+-    Title(c, "LAN", 0, 112, 40);
++    Title(c, "LAN (BETA)", 0, 112, 40);
+     Text(c, "Join a room on another device,", 0, 40);
+     Text(c, "or create one here.", 0, 5);
+-    Text(c, "Tailscale works, but is unstable.", 0, -38, 22, 1, 0xFFF0B0FFu);
++    Text(c, "BETA: rooms can fail to start.", 0, -38, 22, 1, 0xFFF0B0FFu);
++    Text(c, "Tailscale works, but is unstable.", 0, -70, 20, 1, 0xFFF0B0FFu);
+     ButtonPair(c, "Join", "Create Room", 322, g_ui.cursor);
+     Text(c, "(1) Back", 240, 130, 22, 2);  // back to Couch; tappable
+     AddHit(195, 130, 140, 44, -1, true);
+@@ -3287,6 +3288,32 @@ void DrawSession(ImDrawList* list) {
+         }
+         return;
+     }
++    // The session's latency, always on screen: a client shows the round trip to the host, the host
++    // shows each client's. Next to it is the input delay in force, which is the pair to watch when
++    // tuning F10 > LAN > Input delay.
++    std::string ping;
++    if (status.localSlot == 0) {
++        for (uint32_t slot = 1; slot < status.playerCount && slot < 4; ++slot) {
++            if (status.pingMs[slot] == 0xFFFFFFFFu) {
++                continue;
++            }
++            if (!ping.empty()) {
++                ping += "/";
++            }
++            ping += std::to_string(status.pingMs[slot]);
++        }
++    } else if (status.pingMs[0] != 0xFFFFFFFFu) {
++        ping = std::to_string(status.pingMs[0]);
++    }
++    if (!ping.empty()) {
++        const std::string hud = ping + " ms  delay " + std::to_string(status.inputDelay);
++        const float hudY = 200.0f, hudHalfWidth = 132.0f;  // near the top edge (y grows upward)
++        list->AddRectFilled(ImVec2(view.centerX - hudHalfWidth * view.scale, view.centerY - (hudY + 17) * view.scale),
++                            ImVec2(view.centerX + hudHalfWidth * view.scale, view.centerY - (hudY - 17) * view.scale),
++                            IM_COL32(18, 28, 58, 150), 8 * view.scale);
++        Text(c, hud, 0, hudY, 19);
++    }
++
+     std::string line;
+     if (status.waitingForSlot >= 0 && status.waitedMs > 700) {
+         line = UiText::Tr("Waiting for ") + SlotName(status.waitingForSlot) + "...";
+@@ -3296,7 +3323,7 @@ void DrawSession(ImDrawList* list) {
+     if (line.empty()) {
+         return;
+     }
+-    const float y = 190.0f;
++    const float y = 150.0f;  // below the ping readout, which sits near the top edge
+     list->AddRectFilled(ImVec2(view.centerX - 290 * view.scale, view.centerY - (y + 20) * view.scale),
+                         ImVec2(view.centerX + 290 * view.scale, view.centerY - (y - 20) * view.scale),
+                         IM_COL32(20, 40, 90, 180), 10 * view.scale);
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index 70167f5..6ed29af 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -1,3 +1,10 @@
++#if defined(__SWITCH__)
++#include "switch/frame_log.h"
++#include "switch/frame_profile.h"
++#else
++#define RT_FRAME_LOGF RT_LOGF
++#endif
++
+ #include "netplay/game_layout.h"
+ #include "netplay_lobby.h"
+ #include "netplay_ui.h"
+@@ -886,7 +893,7 @@ void DrawRemoteActionSettings() {
+         const bool isDefault = native == PAD_NATIVE_BUTTON_INVALID;
+         ImGui::BeginGroup();
+         const std::string caption =
+-            std::string(isDefault ? kRemoteActionDefaults[i] : NativeButtonForValue(native).label) + "##remoteAction";
++            std::string(isDefault ? kRemoteActionDefaults[i] : ControllerNames::LabelForValue(native)) + "##remoteAction";
+         if (ImGui::Button(caption.c_str(), ImVec2(bindingWidth, 0.0f))) {
+             BeginRebind(RebindKind::RemoteAction, static_cast<uint16_t>(i), kRemoteActionLabels[i]);
+         }
+@@ -958,6 +965,16 @@ void DrawControllerSettings() {
+         ImGui::EndMenu();
+     }
+ 
++    ImGui::SeparatorText("Button labels");
++    static int g_buttonLabelLayout = RuntimeConfigFile::ButtonLayout(0);
++    static constexpr const char* kButtonLayoutNames[] = {"Auto (name both)", "PlayStation", "Xbox", "Nintendo"};
++    if (ImGui::Combo("Show names as", &g_buttonLabelLayout, kButtonLayoutNames,
++                     static_cast<int>(std::size(kButtonLayoutNames)))) {
++        ControllerNames::SetLayout(static_cast<ControllerNames::Layout>(g_buttonLabelLayout));
++        RuntimeConfigFile::SetButtonLayout(g_buttonLabelLayout);
++        Keybinds::NoteBindingsChanged();  // the prompts redraw with the new names
++    }
++
+     uint32_t mappingCount = 0;
+     PADButtonMapping* mappings = PADGetButtonMappings(static_cast<uint32_t>(g_controllerPort), &mappingCount);
+     if (mappings == nullptr || mappingCount != PAD_BUTTON_COUNT) {
+@@ -1079,7 +1096,7 @@ void DrawControllerSettings() {
+         };
+         ImGui::BeginGroup();
+         ImGui::SetNextItemWidth(bindingWidth);
+-        const std::string primaryCaption = std::string(current.label) + "##primary";
++        const std::string primaryCaption = ControllerNames::LabelFor(current) + "##primary";
+         if (ImGui::Button(primaryCaption.c_str(), ImVec2(bindingWidth, 0.0f))) {
+             BeginRebind(RebindKind::Controller, kControllerButtons[i].padButton, kControllerButtons[i].label);
+         }
+@@ -1101,7 +1118,7 @@ void DrawControllerSettings() {
+                 ImGui::TextUnformatted("or");
+                 ImGui::SameLine();
+                 ImGui::BeginGroup();
+-                const char* altLabel = altBound ? NativeButtonForValue(altIt->nativeButton).label : "None";
++                const std::string altLabel = altBound ? ControllerNames::LabelForValue(altIt->nativeButton) : "None";
+                 ImGui::SetNextItemWidth(bindingWidth);
+                 const std::string altCaption = std::string(altLabel) + "##alt";
+                 if (ImGui::Button(altCaption.c_str(), ImVec2(bindingWidth, 0.0f))) {
+@@ -1208,6 +1225,18 @@ void DrawLanPlaySettings() {
+         ownAddresses = NetplayLobby::OwnAddresses();
+         ownAddressesAt = SDL_GetTicks();
+     }
++    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "LAN play is in beta: rooms can fail to start or drop.");
++    // The one knob that decides whether a lockstep session is smooth or stutters: how many frames of
++    // input to hold back so a late packet does not stop the game for everyone.
++    int delay = RuntimeConfigFile::NetplayInputDelay();
++    ImGui::SetNextItemWidth(180.0f);
++    ImGui::SliderInt("Input delay", &delay, 0, 20, delay == 0 ? "auto" : "%d frames");
++    if (ImGui::IsItemDeactivatedAfterEdit()) {
++        RuntimeConfigFile::SetNetplayInputDelay(delay);
++    }
++    ImGui::TextDisabled("Auto sizes it from the room's ping and jitter. Raise it if the game hitches and");
++    ImGui::TextDisabled("then skips ahead; lower it if every button feels late. Read when a room starts.");
++    ImGui::Separator();
+     ImGui::TextUnformatted("Rooms are found on your Wi-Fi by themselves, and over Tailscale through");
+     ImGui::TextUnformatted("the devices in `tailscale status` and the ones below.");
+     ImGui::Separator();
+@@ -1438,7 +1467,11 @@ void DrawFpsOverlay() {
+         g_frameTimeNext = (g_frameTimeNext + 1) % kFrameTimeCount;
+         // NSMBW_LOG_FPS: what the graph shows, every 2 s: the presented frames' times, which can be
+         // uneven while the game's own frames (vi's fps line) are not.
++#if defined(__SWITCH__)
++        static const bool s_log = switch_frame_profiling_enabled();
++#else
+         static const bool s_log = std::getenv("NSMBW_LOG_FPS") != nullptr;
++#endif
+         if (s_log && dt > 0.0f && dt < 1.0f) {
+             static float s_window = 0, s_worst = 0, s_sumSq = 0;
+             static int s_frames = 0, s_long = 0, s_short = 0;
+@@ -1451,7 +1484,7 @@ void DrawFpsOverlay() {
+             s_short += frameMs < 12.0f ? 1 : 0;
+             if (s_window >= 2.0f) {
+                 const float mean = s_window * 1000.0f / s_frames;
+-                RT_LOGF(RT_TAG_RUNTIME,
++                RT_FRAME_LOGF(RT_TAG_RUNTIME,
+                         "graph: %d frames, mean %.2f ms, jitter %.2f ms, worst %.1f ms, %d over 20 ms, %d under 12 ms\n",
+                         s_frames, mean, std::sqrt(std::max(0.0f, s_sumSq / s_frames - mean * mean)), s_worst, s_long,
+                         s_short);
+@@ -2144,7 +2177,8 @@ std::string SingleControllerLabel(int action) {
+         const auto& configured = RuntimeConfigFile::RemoteAction(left ? 0 : 1);
+         const uint32_t native = configured ? ControllerNames::ParseNativeBinding(*configured) : PAD_NATIVE_BUTTON_INVALID;
+         if (native == PAD_NATIVE_BUTTON_INVALID) return left ? "Right stick left" : "Right stick right";
+-        return ShortButtonLabel(NativeButtonForValue(native).label);
++        const std::string label = ControllerNames::LabelForValue(native);
++        return ShortButtonLabel(label.c_str());
+     }
+     const int port = GamepadPort();
+     if (port < 0 || action < 0 || action >= static_cast<int>(kActionPadButton.size())) return "";
+@@ -2153,7 +2187,8 @@ std::string SingleControllerLabel(int action) {
+     for (uint32_t i = 0; mappings != nullptr && i < count; ++i) {
+         if (mappings[i].padButton == kActionPadButton[action]) {
+             if (mappings[i].nativeButton == PAD_NATIVE_BUTTON_DISABLED) return "";
+-            return ShortButtonLabel(NativeButtonForValue(mappings[i].nativeButton).label);
++            const std::string label = ControllerNames::LabelForValue(mappings[i].nativeButton);
++            return ShortButtonLabel(label.c_str());
+         }
+     }
+     return "";
+@@ -2583,6 +2618,38 @@ void RunShaderLoadingScreen() noexcept {
+     const auto start = Clock::now();
+     uint32_t total = 0;
+     aurora_get_prewarm_progress(nullptr, &total);
++#if defined(NSMBW_USE_DEKO3D)
++    if (total == 0) {
++        aurora_prewarm_release(UINT32_MAX);
++        return;
++    }
++    constexpr auto limit = std::chrono::minutes(3);
++    bool released = false;
++    while (Clock::now() - start < limit) {
++        UpdateAuroraAndProcessEvents();
++        const uint32_t queued = aurora_get_queued_pipeline_count();
++        if (released && queued == 0) {
++            break;
++        }
++        if (BeginAuroraFrame()) {
++            aurora_wait_for_frame_worker();
++            DrawShaderLoading(total - std::min(total, queued), total);
++            aurora_end_frame();
++        }
++        if (!released) {
++            aurora_prewarm_release(UINT32_MAX);
++            released = true;
++        }
++        SDL_Delay(50);
++    }
++    const uint32_t remaining = aurora_get_queued_pipeline_count();
++    UpdateAuroraAndProcessEvents();
++    if (BeginAuroraFrame()) {
++        g_auroraFrameActive.store(true, std::memory_order_release);
++    }
++    RT_LOGF(RT_TAG_RUNTIME, "shader loading screen: %u/%u pipelines ready in %.1f s\n",
++            total - std::min(total, remaining), total, seconds(Clock::now() - start));
++#else
+     const double cores = std::max(2u, std::thread::hardware_concurrency());
+     const double busyCores = std::max(1.0, cores - 0.8);
+     constexpr uint32_t batch = 192;
+@@ -2647,5 +2714,6 @@ void RunShaderLoadingScreen() noexcept {
+     }
+     RT_LOGF(RT_TAG_RUNTIME, "shader loading screen: %u pipelines in %u batches, %.1f s, %u frames\n", total, batches,
+             seconds(Clock::now() - start), frames);
++#endif
+ }
+ } // namespace settings_overlay
+diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
+index 97e25ce..96516c6 100644
+--- a/runtime/src/system_bridge.cpp
++++ b/runtime/src/system_bridge.cpp
+@@ -37,6 +37,15 @@ thread_local uint32_t g_sehLastAccessType = 0;
+ // Forward declaration for data section initialization generated by the translator.
+ extern "C" void InitializeDataSections();
+ 
++// generated/guest_symbol_table.cpp defines these with C linkage. They must be declared outside the
++// anonymous namespace below: a C-linkage name declared inside one still has internal linkage, which
++// makes the reference unresolvable under GCC.
++extern "C" {
++extern const uint32_t kGuestMapSymbolCount;
++extern const uint32_t kGuestMapSymbolAddresses[];
++extern const char* const kGuestMapSymbolNames[];
++}
++
+ namespace {
+ std::string Hex32(uint32_t value) {
+     std::ostringstream oss;
+@@ -67,13 +76,6 @@ std::optional<TranslatedFunctionInfo> FindNearestTranslatedFunction(uint32_t add
+     return std::nullopt;
+ }
+ 
+-// generated/guest_symbol_table.cpp (or the stub when it is absent): the
+-// project's function-map names, sorted by address, for crash symbolization.
+-extern "C" {
+-extern const uint32_t kGuestMapSymbolCount;
+-extern const uint32_t kGuestMapSymbolAddresses[];
+-extern const char* const kGuestMapSymbolNames[];
+-}
+ 
+ // Floor lookup into the function-map name table with the same gap cap as the
+ // registry heuristic above. Returns nullptr when no named symbol is close.
+@@ -309,21 +311,38 @@ void DumpGuestCrashHints(std::ostream& os, const CpuContext* cpu) {
+ 
+ } // namespace
+ 
++extern "C" void switch_trace_mark(const char*);
++
+ void SystemBridge::Initialize() {
++    switch_trace_mark("SB: enter");
++    {
++        extern char __bss_start__[] __attribute__((weak));
++        if (__bss_start__ != nullptr) {
++            volatile unsigned* words = reinterpret_cast<volatile unsigned*>(__bss_start__);
++            char line[128];
++            std::snprintf(line, sizeof line, "BSS@SB: %08x %08x %08x %08x",
++                          words[0], words[16], words[48], words[256]);
++            switch_trace_mark(line);
++        }
++    }
+     const auto memoryConfig = Memory::Config::WiiDefaults();
+     Memory::Init(memoryConfig);
++    switch_trace_mark("SB: memory init");
+ 
+     SeedLowMemDefaults(memoryConfig);
++    switch_trace_mark("SB: lowmem");
+ 
+     // Initialize from the embedded DOL/REL data sections. This provides the
+     // initial memory state for .data, .rodata, .sdata, etc.
+     RT_LOG(RT_TAG_RUNTIME) << "Initializing data sections from embedded DOL/REL data" << std::endl;
+     InitializeDataSections();
++    switch_trace_mark("SB: data sections");
+ 
+     // Constructors run before the main entry point, but they still require the
+     // PowerPC ABI environment. Keep using the persistent context here: the old
+     // AbiCallContext path implicitly selected and seeded it for every ctor.
+     InitializePersistentCpuContext();
++    switch_trace_mark("SB: cpu context");
+     CpuContext& cpu = GetPersistentCpuContext();
+     cpu.gpr[1] = 0x81700000u;
+     CpuContextScope scope(&cpu);
+@@ -338,22 +357,43 @@ void SystemBridge::Initialize() {
+     const uint32_t dolCtorEnd = 0x802EDCC0;
+ 
+     int dolCount = 0;
++    int ctorIndex = 0;
+     for (uint32_t addr = dolCtorStart; addr < dolCtorEnd; addr += 4) {
++        {
++            const std::string line = "SB: dol ctor " + std::to_string(ctorIndex) + " @" + Hex32(addr);
++            switch_trace_mark(line.c_str());
++            ctorIndex++;
++        }
+         uint32_t funcAddr = 0;
+         try {
+             funcAddr = Memory::Read32(addr);
+         } catch (...) {
++            switch_trace_mark("SB: read threw");
+             continue;
+         }
++        {
++            const std::string line = "SB: read " + Hex32(funcAddr);
++            switch_trace_mark(line.c_str());
++        }
+ 
+-        if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) continue;
++        if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) {
++            switch_trace_mark("SB: skipped (empty slot)");
++            continue;
++        }
+ 
++        switch_trace_mark(TranslatedFunctionRegistry::FindByAddressPtr(funcAddr) ? "SB: translated found"
++                                                                                : "SB: translated MISSING");
+         if (TranslatedFunctionRegistry::FindByAddressPtr(funcAddr)) {
+             MkwJmpBuf jumpBuf;
+             g_sehJumpTarget = &jumpBuf;
+             if (MKW_SETJMP(jumpBuf) == 0) {
++                {
++                    const std::string line = "SB: invoke " + Hex32(funcAddr);
++                    switch_trace_mark(line.c_str());
++                }
+                 cpu.gpr[1] = 0x81700000u;
+                 InvokeIndirectCpu(funcAddr, &cpu);
++                switch_trace_mark("SB: ctor returned");
+                 dolCount++;
+             } else {
+                 RT_LOG(RT_TAG_RUNTIME) << "SEH Exception caught invoking DOL ctor 0x" << std::hex << funcAddr
+diff --git a/runtime/src/virtual_remote.cpp b/runtime/src/virtual_remote.cpp
+index 9dffb8a..88b60cc 100644
+--- a/runtime/src/virtual_remote.cpp
++++ b/runtime/src/virtual_remote.cpp
+@@ -11,6 +11,9 @@
+ #include "runtime_log.h"
+ #include "settings_overlay.h"
+ #include "wii_remote_input.h"
++#if defined(__SWITCH__)
++#include "switch/menu_controls.h"
++#endif
+ 
+ #include <dolphin/pad.h>
+ #include <aurora/sdl_gamepad.h>
+@@ -393,8 +396,14 @@ Intent PadIntent(uint32_t chan, const PADStatus& pad, SDL_Gamepad* gamepad) {
+         if (std::abs(sx) >= kDiagonalSlope * std::abs(sy)) intent.buttons |= sx < 0 ? kScreenLeft : kScreenRight;
+         if (std::abs(sy) >= kDiagonalSlope * std::abs(sx)) intent.buttons |= sy < 0 ? kScreenDown : kScreenUp;
+     }
+-    if (b & PAD_BUTTON_A) intent.buttons |= kWpadTwo;
+-    if (b & (PAD_BUTTON_B | PAD_BUTTON_X)) intent.buttons |= kWpadOne;
++#if defined(__SWITCH__)
++    const bool menuButtons = (b & (PAD_BUTTON_A | PAD_BUTTON_B)) && SwitchUsesMenuButtons();
++#else
++    constexpr bool menuButtons = false;
++#endif
++    if (b & PAD_BUTTON_A) intent.buttons |= menuButtons ? kWpadOne : kWpadTwo;
++    if (b & PAD_BUTTON_B) intent.buttons |= menuButtons ? kWpadTwo : kWpadOne;
++    if (b & PAD_BUTTON_X) intent.buttons |= kWpadOne;
+     if (b & PAD_BUTTON_Y) intent.buttons |= kWpadA;
+     if (b & PAD_BUTTON_START) intent.buttons |= kWpadPlus;
+     const RemoteBinding& tiltLeft = g_remoteBindings[kRemoteTiltLeft];

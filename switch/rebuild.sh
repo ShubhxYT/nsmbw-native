@@ -192,7 +192,7 @@ Path(output).write_text(json.dumps(config))
 PY
     "$DEVKITPRO/tools/bin/npdmtool" "$npdm_json" "$PACK/exefs/main.npdm"
     rm -rf "$PACK/out_rb" && mkdir -p "$PACK/out_rb"
-    /deps/hacBrewPack/hacbrewpack --keyset "$PACK/keys.dat" --exefsdir "$PACK/exefs" \
+    /deps/hacBrewPack/hacbrewpack --keyset "${NSMBW_SWITCH_KEYS:-$PACK/keys.dat}" --exefsdir "$PACK/exefs" \
         --controldir "$PACK/control_g" --romfsdir "$PACK/romfs" --nologo --plaintext \
         --titleid "$TID" --titlename "$NAME" --tempdir /tmp/hbprb --nspdir "$PACK/out_rb" 2>&1 | tail -1
     ls -la "$PACK/out_rb"/*.nsp | awk '{print $5" bytes"}'

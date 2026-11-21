@@ -1,0 +1,85 @@
+diff --git a/absl/base/internal/sysinfo.cc b/absl/base/internal/sysinfo.cc
+index cd08e51..9d23d6a 100644
+--- a/absl/base/internal/sysinfo.cc
++++ b/absl/base/internal/sysinfo.cc
+@@ -30,6 +30,10 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++#ifdef __SWITCH__
++#include <switch.h>
++#endif
++
+ #if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #endif
+@@ -465,6 +469,10 @@ pid_t GetTID() {
+   return static_cast<pid_t>(zx_thread_self());
+ }
+ 
++#elif defined(__SWITCH__)
++
++pid_t GetTID() { return static_cast<pid_t>(threadGetCurHandle()); }
++
+ #else
+ 
+ // Fallback implementation of `GetTID` using `pthread_self`.
+diff --git a/absl/base/internal/thread_identity.cc b/absl/base/internal/thread_identity.cc
+index 0471a25..6367ec1 100644
+--- a/absl/base/internal/thread_identity.cc
++++ b/absl/base/internal/thread_identity.cc
+@@ -85,7 +85,7 @@ void SetCurrentThreadIdentity(ThreadIdentity* identity,
+                   reclaimer);
+ 
+ #if defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(__MINGW32__) || \
+-    defined(__hexagon__)
++    defined(__hexagon__) || defined(__SWITCH__)
+   // Emscripten, WASI and MinGW pthread implementations does not support
+   // signals. See
+   // https://kripken.github.io/emscripten-site/docs/porting/pthreads.html for
+diff --git a/absl/debugging/internal/elf_mem_image.h b/absl/debugging/internal/elf_mem_image.h
+index c8a1036..32eba91 100644
+--- a/absl/debugging/internal/elf_mem_image.h
++++ b/absl/debugging/internal/elf_mem_image.h
+@@ -34,7 +34,8 @@
+ 
+ #if defined(__ELF__) && !defined(__OpenBSD__) && !defined(__QNX__) &&    \
+     !defined(__asmjs__) && !defined(__wasm__) && !defined(__HAIKU__) &&  \
+-    !defined(__sun) && !defined(__VXWORKS__) && !defined(__hexagon__) && \
++    !defined(__sun) && !defined(__VXWORKS__) && !defined(__hexagon__) &&                 \
++    !defined(__SWITCH__) && \
+     !defined(__XTENSA__)
+ #define ABSL_HAVE_ELF_MEM_IMAGE 1
+ #endif
+diff --git a/absl/time/internal/cctz/src/time_zone_libc.cc b/absl/time/internal/cctz/src/time_zone_libc.cc
+index 362da1a..86eec77 100644
+--- a/absl/time/internal/cctz/src/time_zone_libc.cc
++++ b/absl/time/internal/cctz/src/time_zone_libc.cc
+@@ -27,6 +27,18 @@
+ #include "absl/time/internal/cctz/include/cctz/civil_time.h"
+ #include "absl/time/internal/cctz/include/cctz/time_zone.h"
+ 
++#ifdef __SWITCH__
++// devkitA64/newlib provides these ABI globals, but <time.h> hides their
++// declarations when Dawn compiles with strict -std=c++20 (__STRICT_ANSI__).
++extern "C" {
++extern long _timezone;
++extern char* _tzname[2];
++}
++#ifndef tzname
++#define tzname _tzname
++#endif
++#endif
++
+ #if defined(_AIX)
+ extern "C" {
+ extern long altzone;
+@@ -61,7 +73,7 @@ auto tm_zone(const std::tm& tm) -> decltype(tzname[0]) {
+   return tzname[is_dst];
+ }
+ #elif defined(__native_client__) || defined(__myriad2__) || \
+-    defined(__EMSCRIPTEN__)
++    defined(__EMSCRIPTEN__) || defined(__SWITCH__)
+ // Uses the globals: '_timezone' and 'tzname'.
+ auto tm_gmtoff(const std::tm& tm) -> decltype(_timezone + 0) {
+   const bool is_dst = tm.tm_isdst > 0;

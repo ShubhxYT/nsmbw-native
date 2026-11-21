@@ -1,7 +1,8 @@
-# New Super Mario Bros. Wii — native macOS, Windows & iPad build kit
+# New Super Mario Bros. Wii — native macOS, Windows, iPad & Switch build kit
 
 Turn **your own copy** of New Super Mario Bros. Wii into a native app: a `.app` on Apple silicon, a
-`.exe` folder on Windows, or an unsigned IPA for an iPhone or iPad. No emulator, no JIT — the game's
+`.exe` folder on Windows, an unsigned IPA for an iPhone or iPad, or a standalone NSP for a modded
+Nintendo Switch. No emulator, no JIT — the game's
 PowerPC code is translated ahead of time to C++ and compiled for your machine, with the Wii's
 graphics rebuilt on Metal or D3D12.
 
@@ -72,6 +73,23 @@ that are already translated, and `--configure-only` stops after CMake when somet
 
 The details — what the iOS patch changes and why, the pinned Dawn archive, installing, on-device
 paths and the two open gaps — are in **[docs/ios.md](docs/ios.md)**.
+
+### Nintendo Switch
+
+```bash
+./make-nsmbw-switch.sh --disc "/path/to/New Super Mario Bros. Wii (USA) (Rev 1).rvz"
+```
+
+You get `build/switch/aaa-nsmbw-v1.1.3-standalone.nsp`. It includes the disc data and runs from
+the installed title. The game creates its saves and shader cache on the SD card on first launch.
+Leave the game open while it compiles its shaders on that first launch.
+
+Run from macOS or Linux with Docker, the .NET 8 SDK, Python 3.10+, Git and curl. The packager reads
+your local Switch key file from `~/.switch/prod.keys` by default. Use `--keys PATH` if it is elsewhere.
+The first build downloads and compiles the toolchain dependencies. Allow about 10 GB free for the
+image, sources, objects and disc extraction. Reruns reuse the translated code and compiled objects.
+Use `--disc-dir` for an extracted disc, `--icon` for a custom HOME icon, or `--help` for all options.
+See the [Switch rebuild guide](docs/REBUILD.md#standalone-nsp-builder) for details.
 
 ### Useful options
 

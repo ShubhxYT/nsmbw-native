@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "data_root.h"
@@ -109,9 +110,10 @@ extern "C" void __appInit(void) {
     // Base IPC. Without this nothing else can be reached.
     smInitialize();
 
-    // Filesystem: the game data and logs live on the SD card.
-    if (R_SUCCEEDED(fsInitialize())) {
-        fsdevMountSdmc();
+    // Create writable storage before the startup loggers and config load run.
+    if (R_SUCCEEDED(fsInitialize()) && R_SUCCEEDED(fsdevMountSdmc())) {
+        (void)::mkdir("sdmc:/switch", 0777);
+        (void)::mkdir(NSMBW_SWITCH_DATA_ROOT, 0777);
     }
 
     // Applet state, so the system knows the process is a running application (and so nwindow works).
@@ -122,8 +124,8 @@ extern "C" void __appInit(void) {
     // No stdio here: this runs inside crt0, before libc's streams exist. Touching stderr aborts.
     hidInitialize();
 
-    // Clock, used for timing and for the crash reporter's timestamps.
-    timeInitialize();
+    // Frame timing uses the hardware counter. Leave time-service clock objects available to
+    // processes such as Ultrahand that need a wall clock while the game is running.
 
     // Diagnostic: .bss must be zero here, before any C++ static initialiser runs. A non-zero word
     // means function-local statics never get constructed, because their guard variables read as
@@ -148,7 +150,6 @@ extern "C" void __appInit(void) {
 }
 
 extern "C" void __appExit(void) {
-    timeExit();
     hidExit();
     closeMainWindow();
     appletExit();
@@ -158,7 +159,17 @@ extern "C" void __appExit(void) {
 }
 
 
-// The pipeline seed lives in the NSP's RomFS. Writable caches stay on the SD card.
+// RomFS holds the read-only package data. Writable files stay on the SD card.
 extern "C" bool switch_mount_shader_seed() {
-    return R_SUCCEEDED(romfsInit());
+    static const bool mounted = R_SUCCEEDED(romfsInit());
+    return mounted;
+}
+
+extern "C" bool switch_has_bundled_game() {
+    static const bool bundled = [] {
+        struct stat info{};
+        return switch_mount_shader_seed() &&
+               ::stat(NSMBW_SWITCH_BUNDLED_GAME_ROOT "/sys/boot.bin", &info) == 0 && S_ISREG(info.st_mode);
+    }();
+    return bundled;
 }
