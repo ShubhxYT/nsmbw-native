@@ -3,7 +3,6 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-upstream=e5fce0f26a2229b8ed70357d2d503780235c0eba
 version=1.1.3
 disc=
 disc_dir=
@@ -83,53 +82,13 @@ trap 'rmdir "$lock"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [[ -n "$disc" ]]; then
-    step 'Extracting your disc'
-    disc_hash="$(python3 "$root/switch/standalone/inputs.py" hash "$disc")"
-    disc_dir="$out/discs/$disc_hash"
-    if [[ ! -f "$disc_dir/.extracted" ]]; then
-        nod="$out/tools/nodtool-$nod_asset"
-        if [[ ! -x "$nod" ]]; then
-            curl -fLSs --retry 3 "https://github.com/encounter/nod/releases/download/v2.0.0-alpha.10/nodtool-$nod_asset" -o "$nod.tmp"
-            chmod +x "$nod.tmp"
-            mv "$nod.tmp" "$nod"
-        fi
-        [[ ! -e "$disc_dir" ]] || die "incomplete extraction at $disc_dir (choose another --out)"
-        mkdir -p "$out/discs"
-        extracted="$(mktemp -d "$out/discs/.extract.XXXXXX")"
-        if ! "$nod" extract "$disc" "$extracted" >"$out/logs/extract.log" 2>&1; then
-            rm -rf "$extracted"
-            die "disc extraction failed (see $out/logs/extract.log)"
-        fi
-        touch "$extracted/.extracted"
-        mv "$extracted" "$disc_dir"
-    fi
-fi
-
-build_id="$(python3 "$root/switch/standalone/inputs.py" validate "$disc_dir" \
-    "$upstream" "$root/switch/patches/standalone-runtime.patch" \
-    "$root/switch/standalone/translate.sh" "$root/switch/standalone/global.json")"
-source_dir="$out/source-$build_id"
-if [[ ! -f "$source_dir/.translated" ]]; then
-    step 'Fetching the pinned runtime and translating the disc'
-    if [[ ! -d "$source_dir/.git" ]]; then
-        git init -q "$source_dir"
-    fi
-    git -C "$source_dir" fetch -q --depth 1 \
-        https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git "$upstream"
-    git -C "$source_dir" checkout -q --detach --force "$upstream"
-    git -C "$source_dir" apply --whitespace=nowarn "$root/switch/patches/standalone-runtime.patch"
-    cp "$root/switch/standalone/global.json" "$source_dir/global.json"
-    bash "$root/switch/standalone/translate.sh" "$source_dir" "$disc_dir" "$root" "$jobs" \
-        >"$out/logs/translate.log" 2>&1 ||
-        { tail -16 "$out/logs/translate.log" >&2; die 'translation failed'; }
-    touch "$source_dir/.translated"
-fi
+source "$root/switch/standalone/prepare.sh"
+prepare_switch_source
 
 step 'Preparing the Switch toolchain'
 image=${NSMBW_SWITCH_IMAGE:-nsmbw-switch-builder:1}
 if [[ -z "${NSMBW_SWITCH_IMAGE:-}" ]]; then
-    docker build --platform "$platform" -t "$image" -f "$root/switch/standalone/Dockerfile" \
+    docker build --target toolchain --platform "$platform" -t "$image" -f "$root/switch/standalone/Dockerfile" \
         "$root/switch/standalone"
 fi
 
@@ -153,6 +112,6 @@ docker run "${docker_args[@]}" --network none "${inputs[@]}" "$image" \
 
 result="$out/aaa-nsmbw-v$version-standalone.nsp"
 staged_nsp="$(mktemp "$out/.nsp.XXXXXX")"
-cp "$pack/out_rb/01004E53A1B50000.nsp" "$staged_nsp"
+cp "$pack/out_rb/01004e53a1b50000.nsp" "$staged_nsp"
 mv -f "$staged_nsp" "$result"
 printf '\nBuilt %s\n' "$result"

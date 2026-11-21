@@ -370,6 +370,11 @@ Run `./make-nsmbw-switch.sh --disc /path/to/disc.rvz` from the repository root. 
 directory containing `sys/` and `files/`. `--out` selects the output and working directory.
 The default is `build/switch`, which contains the final NSP and the stage logs.
 
+On Windows, run `.\make-nsmbw-switch.ps1 -Disc 'D:\Wii dumps\disc.rvz'` in PowerShell with Docker
+Desktop in Linux containers mode. Use `-DiscDir`, `-Keys`, `-Icon`, `-Version`, `-Jobs` and `-Out`
+for the corresponding options. Windows keeps build intermediates in a Docker volume keyed to
+the output directory. The NSP and logs are copied back to the Windows filesystem.
+
 The script extracts with nodtool, applies the Switch runtime and Aurora changes to a pinned
 upstream checkout, then runs the translator. The Docker build prepares Dawn and libuam for
 deko3d, compiles the native and generated sources, and uses `switch/rebuild.sh` to link and

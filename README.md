@@ -76,19 +76,29 @@ paths and the two open gaps — are in **[docs/ios.md](docs/ios.md)**.
 
 ### Nintendo Switch
 
+On macOS or Linux, run:
+
 ```bash
 ./make-nsmbw-switch.sh --disc "/path/to/New Super Mario Bros. Wii (USA) (Rev 1).rvz"
+```
+
+On Windows, open PowerShell with Docker Desktop running in Linux containers mode:
+
+```powershell
+.\make-nsmbw-switch.ps1 -Disc 'D:\Wii dumps\New Super Mario Bros. Wii (USA) (Rev 1).rvz'
 ```
 
 You get `build/switch/aaa-nsmbw-v1.1.3-standalone.nsp`. It includes the disc data and runs from
 the installed title. The game creates its saves and shader cache on the SD card on first launch.
 Leave the game open while it compiles its shaders on that first launch.
 
-Run from macOS or Linux with Docker, the .NET 8 SDK, Python 3.10+, Git and curl. The packager reads
-your local Switch key file from `~/.switch/prod.keys` by default. Use `--keys PATH` if it is elsewhere.
-The first build downloads and compiles the toolchain dependencies. Allow about 10 GB free for the
-image, sources, objects and disc extraction. Reruns reuse the translated code and compiled objects.
-Use `--disc-dir` for an extracted disc, `--icon` for a custom HOME icon, or `--help` for all options.
+macOS and Linux also need the .NET 8 SDK, Python 3.10+, Git and curl. The Windows builder includes
+these tools in its Docker image. Both commands read your local Switch key file from
+`~/.switch/prod.keys` by default. Pass `--keys PATH` on macOS or Linux, or `-Keys PATH` on Windows,
+if it lives elsewhere.
+
+Allow about 10 GB free for the first build. Reruns reuse the translated code and compiled objects.
+Use `--disc-dir` or `-DiscDir` for an extracted disc and `--icon` or `-Icon` for a custom HOME icon.
 See the [Switch rebuild guide](docs/REBUILD.md#standalone-nsp-builder) for details.
 
 ### Useful options
