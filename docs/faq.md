@@ -19,6 +19,14 @@ Build an unsigned IPA with `make-nsmbw-ios.sh` and install it with **LiveContain
 The app carries the game data inside the bundle. Full steps, including the iOS patch and the Xcode
 requirements, are in [ios.md](ios.md).
 
+## Can I run New Super Mario Bros. Wii on a Nintendo Switch?
+
+Yes, on a modded console, as a standalone NSP built from your own dump — not an emulator. It runs at
+720p and is single player; LAN play is desktop only. Measured on a Switch Lite: **55.9 fps** average in
+the first course and **38.2 fps** in the water level, which is CPU-bound (the game thread uses about
+30 ms per frame there against a 16.67 ms budget). The first launch compiles shaders on the console, so
+leave the game open while it does that.
+
 ## Does this include the game, the ROM, or the keys?
 
 No. There is no game code, no assets, no keys and no disc image anywhere in this repository — only

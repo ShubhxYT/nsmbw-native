@@ -17,8 +17,10 @@ License: GPL-3.0 (the patches build a GPL-3.0 program)
 - **Supported game version:** USA `SMNE01`, revision 1. A dump whose `main.dol` differs is accepted
   after the rest of the disc identity validates it.
 - **Platforms:** macOS on Apple silicon (tested, ~58 fps, Metal); Windows 10/11 x64 (tested, ~58 fps,
-  D3D12); iPadOS/iOS 16+ as an unsigned IPA (tested on iPad Pro M4, installed through LiveContainer).
-- **Online play:** LAN lockstep, labelled beta, desktop only. Rooms are found by UDP broadcast on
+  D3D12); iPadOS/iOS 16+ as an unsigned IPA (tested on iPad Pro M4, installed through LiveContainer);
+  a modded Nintendo Switch as a standalone NSP at 720p (tested on Switch Lite: 55.9 fps in the first
+  course, 38.2 fps in the water level).
+- **Online play:** LAN lockstep, labelled beta, desktop only (not on Switch). Rooms are found by UDP broadcast on
   port 52130 and over Tailscale; Tailscale Funnel and ngrok cannot carry it (they do not forward UDP).
 - **Controllers:** up to four, mapped automatically. Xbox button names by default on iOS. On iPad the
   remote's tilt is on L1/R1 because controller gyro is not delivered to apps on current iPadOS.
@@ -36,5 +38,5 @@ License: GPL-3.0 (the patches build a GPL-3.0 program)
 ## Search terms this project answers
 
 New Super Mario Bros. Wii native port; NSMBW PC; NSMBW Mac; NSMBW without emulator; Nintendo Wii
-static recompilation; Wii recompiled to C++; NSMBW iPad; NSMBW iOS; NSMBW LiveContainer; NSMBW IPA;
+static recompilation; Wii recompiled to C++; NSMBW iPad; NSMBW iOS; NSMBW LiveContainer; NSMBW IPA; NSMBW Switch; NSMBW NSP; NSMBW Switch homebrew;
 run Wii games natively on Apple silicon; Wii game native port macOS; Wii game native port Windows.
