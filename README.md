@@ -89,8 +89,10 @@ On Windows, open PowerShell with Docker Desktop running in Linux containers mode
 ```
 
 You get `build/switch/aaa-nsmbw-v1.1.3-standalone.nsp`. It includes the disc data and runs from
-the installed title. The game creates its saves and shader cache on the SD card on first launch.
-Leave the game open while it compiles its shaders on that first launch.
+the installed title. Each Switch profile has its own save, which you can back up and restore using
+DBI or JKSV. When upgrading from an earlier build, launch with the profile that should receive
+the old shared SD save. The game imports that save once and keeps the original SD files available
+as a fallback. Leave the game open while it compiles its shaders on first launch.
 
 macOS and Linux also need the .NET 8 SDK, Python 3.10+, Git and curl. The Windows builder includes
 these tools in its Docker image. Both commands read your local Switch key file from

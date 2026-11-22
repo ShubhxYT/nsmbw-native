@@ -1286,7 +1286,7 @@ index 7ac535d..1cccfb1 100644
      uint8_t* ptr = nullptr;
      if (encodedBias != 0) {
 diff --git a/runtime/include/nand_path.h b/runtime/include/nand_path.h
-index 3e17a75..1965079 100644
+index 3e17a75..6a4c2eb 100644
 --- a/runtime/include/nand_path.h
 +++ b/runtime/include/nand_path.h
 @@ -6,6 +6,7 @@
@@ -1348,6 +1348,45 @@ index 3e17a75..1965079 100644
      std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
      return !ec;
  }
+@@ -205,8 +243,8 @@ inline bool SeedMissingBootstrapFiles(const std::filesystem::path& root) {
+     return true;
+ }
+ 
+-inline std::filesystem::path CreateManagedNandRoot() {
+-    const std::filesystem::path root = ManagedNandRootPath();
++inline std::filesystem::path CreateManagedNandRoot(
++    const std::filesystem::path& root = ManagedNandRootPath()) {
+     std::error_code ec;
+     std::filesystem::create_directories(root, ec);
+     if (ec || !std::filesystem::is_directory(root, ec)) {
+@@ -254,6 +292,15 @@ inline std::filesystem::path ResolveNandRootPath() {
+         return override;
+     }
+     const std::string configPath = RuntimeConfigFile::NandRoot();
++#if defined(__SWITCH__)
++    if (switch_has_bundled_game()) {
++        const auto legacy = configPath.empty() ? ManagedNandRootPath() : ResolveConfiguredPath(configPath);
++        if (!switch_mount_profile_save(legacy.c_str())) {
++            FailNandRoot("Unable to open the selected Switch profile's save or import its SD backup", legacy);
++        }
++        return CreateManagedNandRoot(NSMBW_SWITCH_NATIVE_NAND_ROOT);
++    }
++#endif
+     if (!configPath.empty()) {
+         const auto path = ResolveConfiguredPath(configPath);
+         if (auto existing = ExistingDirectory(path)) {
+@@ -275,6 +322,11 @@ inline std::filesystem::path DiscoverNandRootPath() {
+         if (!RuntimeNandSettings::Ensure(resolved, error)) {
+             FailNandRoot(error.c_str(), RuntimeNandSettings::FilePath(resolved));
+         }
++#if defined(__SWITCH__)
++        if (resolved == NSMBW_SWITCH_NATIVE_NAND_ROOT && !switch_commit_profile_save()) {
++            FailNandRoot("Unable to commit the Switch profile's save", resolved);
++        }
++#endif
+         return resolved;
+     }();
+     return root;
 diff --git a/runtime/include/netplay_session.h b/runtime/include/netplay_session.h
 index 80382d2..5be1969 100644
 --- a/runtime/include/netplay_session.h
@@ -2173,7 +2212,7 @@ index f598eee..dddb582 100644
  
  // 0x801CAB20 -> DVDReadPrio
 diff --git a/runtime/src/hle/storage/nand_api.cpp b/runtime/src/hle/storage/nand_api.cpp
-index 6765a4b..d2b681d 100644
+index 6765a4b..7dc9e60 100644
 --- a/runtime/src/hle/storage/nand_api.cpp
 +++ b/runtime/src/hle/storage/nand_api.cpp
 @@ -170,10 +170,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
@@ -2188,8 +2227,46 @@ index 6765a4b..d2b681d 100644
                      LogNandWarning("NANDOpen", "WARNING: could not seed shadow '%s' (%s), writing in place",
                                     HostPathText(tempPath).c_str(), ec.message().c_str());
                      NandRemove(tempPath);
+@@ -369,9 +366,7 @@ extern "C" int32_t NANDCreate_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr
+     if (!f) {
+         return NAND_RESULT_UNKNOWN;
+     }
+-    std::fclose(f);
+-    
+-    return NAND_RESULT_OK;
++    return std::fclose(f) == 0 && CommitNandChange(hostPath) ? NAND_RESULT_OK : NAND_RESULT_UNKNOWN;
+ }
+ PPC_NATIVE_OVERRIDE(801D84E0, NANDCreate_HLE, int32_t, (uint32_t pathPtr, uint32_t perm, uint32_t attr), (pathPtr, perm, attr));
+ 
+@@ -388,7 +383,7 @@ extern "C" int32_t NANDDelete_HLE(uint32_t pathPtr) {
+         return NAND_RESULT_NOEXISTS;
+     }
+     
+-    if (NandRemove(hostPath)) {
++    if (NandRemove(hostPath) && CommitNandChange(hostPath)) {
+         return NAND_RESULT_OK;
+     }
+     
+@@ -412,7 +407,7 @@ extern "C" int32_t NANDCreateDir_HLE(uint32_t pathPtr, uint32_t perm, uint32_t a
+         return NAND_RESULT_EXISTS;
+     }
+     
+-    if (CreateDirectoryPath(hostPath)) {
++    if (CreateDirectoryPath(hostPath) && CommitNandChange(hostPath)) {
+         return NAND_RESULT_OK;
+     }
+     
+@@ -460,7 +455,7 @@ extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
+     std::error_code ec;
+     std::filesystem::rename(srcHost, dstHost, ec);
+     if (!ec) {
+-        return NAND_RESULT_OK;
++        return CommitNandChange(dstHost) ? NAND_RESULT_OK : NAND_RESULT_UNKNOWN;
+     }
+ 
+     // Flatpak can expose the managed NAND and an external Riivolution save
 diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
-index 4964634..4631c14 100644
+index 4964634..a40442f 100644
 --- a/runtime/src/hle/storage/nand_async.cpp
 +++ b/runtime/src/hle/storage/nand_async.cpp
 @@ -5,6 +5,8 @@
@@ -2361,7 +2438,16 @@ index 4964634..4631c14 100644
  int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
      std::filesystem::path tempPath;
      std::filesystem::path commitPath;
-@@ -381,7 +492,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
+@@ -371,7 +482,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
+             LogNandError(who, "ERROR: flush of '%s' failed", HostPathText(tempPath).c_str());
+             return NAND_RESULT_UNKNOWN;
+         }
+-        return NAND_RESULT_OK;
++        return !writable || CommitNandChange(tempPath) ? NAND_RESULT_OK : NAND_RESULT_UNKNOWN;
+     }
+ 
+     if (!flushed) {
+@@ -381,12 +492,12 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
          return NAND_RESULT_UNKNOWN;
      }
  
@@ -2370,6 +2456,12 @@ index 4964634..4631c14 100644
          NandRemove(tempPath);
          return NAND_RESULT_UNKNOWN;
      }
+ 
+-    return NAND_RESULT_OK;
++    return CommitNandChange(commitPath) ? NAND_RESULT_OK : NAND_RESULT_UNKNOWN;
+ }
+ 
+ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode,
 @@ -454,10 +565,7 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
  
      // The scratch file starts as a byte-for-byte copy of the original and the guest is
@@ -2383,27 +2475,66 @@ index 4964634..4631c14 100644
                  HostPathText(tempPath).c_str(), HostPathText(hostPath).c_str(),
                  ec.message().c_str());
 diff --git a/runtime/src/hle/storage/nand_fs.cpp b/runtime/src/hle/storage/nand_fs.cpp
-index 3deb6aa..4479c0c 100644
+index 3deb6aa..94bbb05 100644
 --- a/runtime/src/hle/storage/nand_fs.cpp
 +++ b/runtime/src/hle/storage/nand_fs.cpp
-@@ -272,17 +272,18 @@ std::filesystem::path TranslateNandPath(const char* wiiPath) {
+@@ -63,15 +63,17 @@ FileHandle* GetHandle(int32_t fd) {
+     return &it->second;
+ }
+ 
+-void CloseFd(int32_t fd) {
++bool CloseFd(int32_t fd) {
+     std::lock_guard<std::mutex> lock(g_fdMutex);
+     auto it = g_fileHandles.find(fd);
+-    if (it != g_fileHandles.end()) {
+-        if (it->second.file) {
+-            std::fclose(it->second.file);
+-        }
+-        g_fileHandles.erase(it);
++    if (it == g_fileHandles.end()) {
++        return false;
+     }
++    const auto& handle = it->second;
++    const bool closed = !handle.file || std::fclose(handle.file) == 0;
++    const bool committed = closed && (handle.mode < 2 || CommitNandChange(handle.path));
++    g_fileHandles.erase(it);
++    return committed;
+ }
+ 
+ // ============================================================================
+@@ -121,6 +123,15 @@ bool NandRename(const std::filesystem::path& from, const std::filesystem::path&
+     return !ec;
+ }
+ 
++bool CommitNandChange([[maybe_unused]] const std::filesystem::path& path) {
++#if defined(__SWITCH__)
++    if (path.native().starts_with(NSMBW_SWITCH_SAVE_DEVICE ":/")) {
++        return switch_commit_profile_save();
++    }
++#endif
++    return true;
++}
++
+ // Guest paths are absolute and already lexically resolved against the NAND root, so
+ // they are appended as relative components instead of replacing the root.
+ static std::filesystem::path BuildHostNandPath(const std::string& wiiPathStr) {
+@@ -272,17 +283,18 @@ std::filesystem::path TranslateNandPath(const char* wiiPath) {
          return {};
      }
  
 -    std::filesystem::path redirectedHostPath;
 -    if (ResolveRiivolutionSaveHostPath(wiiPathStr, redirectedHostPath)) {
 -        return redirectedHostPath;
--    }
--    // Bluetooth passthrough keeps a SYSCONF of its own (the paired remotes), so normal play and LAN
--    // never see one; without passthrough this path resolves as it always has.
--    if (wiiPathStr == "/shared2/sys/SYSCONF" && BtPassthrough::SysconfHostPath(redirectedHostPath)) {
--        return redirectedHostPath;
 +    std::filesystem::path hostPath;
 +    // Bluetooth passthrough keeps its paired remotes in a separate SYSCONF.
 +    if (!ResolveRiivolutionSaveHostPath(wiiPathStr, hostPath) &&
 +        !(wiiPathStr == "/shared2/sys/SYSCONF" && BtPassthrough::SysconfHostPath(hostPath))) {
 +        hostPath = BuildHostNandPath(wiiPathStr);
-+    }
+     }
+-    // Bluetooth passthrough keeps a SYSCONF of its own (the paired remotes), so normal play and LAN
+-    // never see one; without passthrough this path resolves as it always has.
+-    if (wiiPathStr == "/shared2/sys/SYSCONF" && BtPassthrough::SysconfHostPath(redirectedHostPath)) {
+-        return redirectedHostPath;
 +#ifdef __SWITCH__
 +    if (!RecoverSwitchNandFile(hostPath)) {
 +        return {};
@@ -2416,10 +2547,27 @@ index 3deb6aa..4479c0c 100644
  
  // ============================================================================
 diff --git a/runtime/src/hle/storage/nand_internal.h b/runtime/src/hle/storage/nand_internal.h
-index 38c3011..68e2ea0 100644
+index 38c3011..1c97550 100644
 --- a/runtime/src/hle/storage/nand_internal.h
 +++ b/runtime/src/hle/storage/nand_internal.h
-@@ -190,7 +190,12 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx);
+@@ -83,7 +83,7 @@ extern std::mutex g_fdMutex;
+ 
+ int32_t AllocateFd(const std::filesystem::path& path, FILE* file, int32_t mode);
+ FileHandle* GetHandle(int32_t fd);
+-void CloseFd(int32_t fd);
++bool CloseFd(int32_t fd);
+ 
+ // ============================================================================
+ // Path Translation
+@@ -110,6 +110,7 @@ std::string HostPathText(const std::filesystem::path& path);
+ FILE* NandFopen(const std::filesystem::path& path, const char* mode);
+ bool NandRemove(const std::filesystem::path& path);
+ bool NandRename(const std::filesystem::path& from, const std::filesystem::path& to);
++bool CommitNandChange(const std::filesystem::path& path);
+ 
+ bool SeedFaceLibResource(const std::filesystem::path& hostPath);
+ bool IsFaceLibResourcePath(const char* path);
+@@ -190,7 +191,12 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx);
  
  // Shadow-write machinery, defined with the NANDSafeOpen/NANDSafeClose section below.
  std::filesystem::path SafeTempPathFor(const std::filesystem::path& hostPath);
@@ -2432,6 +2580,57 @@ index 38c3011..68e2ea0 100644
  bool IsHostPathOpen(const std::filesystem::path& hostPath);
  int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError);
  
+diff --git a/runtime/src/hle/storage/nand_isfs.cpp b/runtime/src/hle/storage/nand_isfs.cpp
+index 95e89a9..d680cd5 100644
+--- a/runtime/src/hle/storage/nand_isfs.cpp
++++ b/runtime/src/hle/storage/nand_isfs.cpp
+@@ -469,8 +469,7 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
+         return ISFS_EINVAL;
+     }
+     
+-    CloseFd(fd);
+-    return ISFS_OK;
++    return CloseFd(fd) ? ISFS_OK : ISFS_EIO;
+ }
+ PPC_NATIVE_OVERRIDE(80224E60, NAND_IOS_Close_HLE, int32_t, (uint32_t fd), (fd));
+ 
+@@ -592,7 +591,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
+                 const char* path = (const char*)Memory::GetPointer(inBufPtr + 6);
+                 const std::filesystem::path hostPath = TranslateNandPath(path);
+                 
+-                if (CreateDirectoryPath(hostPath)) {
++                if (CreateDirectoryPath(hostPath) && CommitNandChange(hostPath)) {
+                     return ISFS_OK;
+                 }
+                 return ISFS_EIO;
+@@ -607,7 +606,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
+                 
+                 // fs::remove refuses a non-empty directory, matching rmdir.
+                 if (NandRemove(hostPath)) {
+-                    return ISFS_OK;
++                    return CommitNandChange(hostPath) ? ISFS_OK : ISFS_EIO;
+                 }
+                 return ISFS_ENOENT;
+             }
+@@ -651,8 +650,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
+ 
+                 // Create empty file
+                 FILE* f = NandFopen(hostPath, "wb");
+-                if (f) {
+-                    std::fclose(f);
++                if (f && std::fclose(f) == 0 && CommitNandChange(hostPath)) {
+                     return ISFS_OK;
+                 }
+                 return ISFS_EIO;
+@@ -673,7 +671,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
+                 const std::filesystem::path srcHost = TranslateNandPath(srcPath);
+                 const std::filesystem::path dstHost = TranslateNandPath(dstPath);
+                 
+-                if (NandRename(srcHost, dstHost)) {
++                if (NandRename(srcHost, dstHost) && CommitNandChange(dstHost)) {
+                     return ISFS_OK;
+                 }
+                 return ISFS_EIO;
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
 index e97d4d2..fff3c39 100644
 --- a/runtime/src/hle/vi.cpp

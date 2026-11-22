@@ -16,6 +16,7 @@
   },
   "service_host": [],
   "service_access": [
+    "acc:u0",
     "fsp-srv",
     "set:sys",
     "time:u",

@@ -6,8 +6,11 @@
 // brings up exactly what the port needs, treating each optional service as optional.
 #include <switch.h>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -28,6 +31,9 @@ NWindow mainWindow{};
 bool viReady = false;
 bool displayOpen = false;
 bool layerOpen = false;
+
+namespace fs = std::filesystem;
+constexpr char kMarioSavePath[] = "title/00010000/534d4e45/data";
 
 void logWindowInit(const char* step, Result result) {
     char line[96];
@@ -89,6 +95,85 @@ void openMainWindow() {
     if (R_FAILED(result)) {
         closeMainWindow();
     }
+}
+
+bool copyWiiSaveFile(const fs::path& source, const fs::path& destination, std::streamsize size) {
+    std::ifstream input(source, std::ios::binary);
+    std::array<char, 32 * 1024> bytes;
+    if (!input.read(bytes.data(), size) || input.peek() != std::char_traits<char>::eof() || input.bad()) {
+        return false;
+    }
+    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+    output.write(bytes.data(), size);
+    output.close();
+    return output.good();
+}
+
+bool importWiiSave(const fs::path& legacyRoot, const AccountUid& user) {
+    const auto source = legacyRoot / kMarioSavePath;
+    const auto target = fs::path(NSMBW_SWITCH_NATIVE_NAND_ROOT) / kMarioSavePath;
+    const auto claimed = legacyRoot / ".switch-save-importing";
+    const auto imported = legacyRoot / ".switch-save-imported";
+    std::error_code error;
+    // A legacy save was shared by all profiles. Claim it once for the profile
+    // chosen at launch, so a second profile never inherits the first one's progress.
+    if (fs::exists(imported, error)) {
+        return true;
+    }
+    if (error) {
+        return false;
+    }
+    const bool hasClaim = fs::exists(claimed, error);
+    if (error) {
+        return false;
+    }
+    const bool hasNativeProgress = fs::exists(target / "wiimj2d.sav", error);
+    if (error) {
+        return false;
+    }
+    if (hasClaim) {
+        AccountUid owner{};
+        std::ifstream claim(claimed, std::ios::binary);
+        if (!claim.read(reinterpret_cast<char*>(&owner), sizeof(owner)) ||
+            claim.peek() != std::char_traits<char>::eof() || claim.bad()) {
+            return false;
+        }
+        if (owner.uid[0] != user.uid[0] || owner.uid[1] != user.uid[1]) {
+            return true;
+        }
+    } else {
+        // A restored or already populated native save remains authoritative.
+        if (hasNativeProgress || !fs::exists(source / "wiimj2d.sav", error)) {
+            return !error;
+        }
+        const auto pending = legacyRoot / ".switch-save-importing.tmp";
+        std::ofstream claim(pending, std::ios::binary | std::ios::trunc);
+        claim.write(reinterpret_cast<const char*>(&user), sizeof(user));
+        claim.close();
+        if (!claim) {
+            return false;
+        }
+        fs::rename(pending, claimed, error);
+        if (error) {
+            return false;
+        }
+    }
+    // If power was interrupted after the native commit, the claim still lets
+    // this profile finish the import without overwriting its committed files.
+    if (!hasNativeProgress) {
+        fs::create_directories(target, error);
+        if (error) {
+            return false;
+        }
+        const bool hasBanner = fs::exists(source / "banner.bin", error);
+        if (error || (hasBanner && !copyWiiSaveFile(source / "banner.bin", target / "banner.bin", 29344)) ||
+            !copyWiiSaveFile(source / "wiimj2d.sav", target / "wiimj2d.sav", 16288) ||
+            !switch_commit_profile_save()) {
+            return false;
+        }
+    }
+    fs::rename(claimed, imported, error);
+    return !error;
 }
 
 } // namespace
@@ -159,7 +244,7 @@ extern "C" void __appExit(void) {
 }
 
 
-// RomFS holds the read-only package data. Writable files stay on the SD card.
+// RomFS holds the read-only package data.
 extern "C" bool switch_mount_shader_seed() {
     static const bool mounted = R_SUCCEEDED(romfsInit());
     return mounted;
@@ -172,4 +257,40 @@ extern "C" bool switch_has_bundled_game() {
                ::stat(NSMBW_SWITCH_BUNDLED_GAME_ROOT "/sys/boot.bin", &info) == 0 && S_ISREG(info.st_mode);
     }();
     return bundled;
+}
+
+extern "C" bool switch_commit_profile_save() {
+    const Result result = fsdevCommitDevice(NSMBW_SWITCH_SAVE_DEVICE);
+    if (R_FAILED(result)) {
+        logWindowInit("commit profile save", result);
+    }
+    return R_SUCCEEDED(result);
+}
+
+extern "C" bool switch_mount_profile_save(const char* legacyNandRoot) {
+    Result result = accountInitialize(AccountServiceType_Application);
+    logWindowInit("accountInitialize for save", result);
+    if (R_FAILED(result)) {
+        return false;
+    }
+    AccountUid user{};
+    result = accountGetPreselectedUser(&user);
+    if (R_FAILED(result) || !accountUidIsValid(&user)) {
+        // A single local profile also covers launchers that omit a preselected user.
+        user = {};
+        AccountUid users[ACC_USER_LIST_SIZE]{};
+        s32 count = 0;
+        result = accountListAllUsers(users, ACC_USER_LIST_SIZE, &count);
+        if (R_SUCCEEDED(result) && count == 1) {
+            user = users[0];
+        }
+    }
+    accountExit();
+    logWindowInit("select profile for save", result);
+    if (R_FAILED(result) || !accountUidIsValid(&user)) {
+        return false;
+    }
+    result = fsdevMountSaveData(NSMBW_SWITCH_SAVE_DEVICE, FS_SAVEDATA_CURRENT_APPLICATIONID, user);
+    logWindowInit("mount profile save", result);
+    return R_SUCCEEDED(result) && importWiiSave(legacyNandRoot, user);
 }

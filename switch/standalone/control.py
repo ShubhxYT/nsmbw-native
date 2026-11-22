@@ -14,6 +14,7 @@ for start in range(0, 0x3000, 0x300):
     if start == 0 or nacp[start]:
         nacp[start : start + 0x200] = name.ljust(0x200, b"\0")
 nacp[0x3060:0x3070] = sys.argv[1].encode().ljust(16, b"\0")
+nacp[0x3025] = 1  # StartupUserAccount::Required
 (root / "control.nacp").write_bytes(nacp)
 
 icon = Path("/run/nsmbw-icon")
