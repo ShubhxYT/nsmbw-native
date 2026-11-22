@@ -18,7 +18,7 @@ nacp[0x3060:0x3070] = sys.argv[1].encode().ljust(16, b"\0")
 
 icon = Path("/run/nsmbw-icon")
 if not icon.is_file():
-    icon = Path("/src/runtime/assets/icon/icon_source.jpg")
+    icon = Path(__file__).with_name("home-icon.png")
 with Image.open(icon) as source:
     image = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (256, 256))
     image.save(root / "icon_AmericanEnglish.dat", "JPEG", quality=90)
